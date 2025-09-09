@@ -1,0 +1,268 @@
+{% extends "base.html" %}
+
+{% block title %}Debug Backup{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="bi bi-bug"></i> Backup Debug Information</h2>
+    <div>
+        <a href="{{ url_for('backups') }}" class="btn btn-primary me-2">
+            <i class="bi bi-arrow-left"></i> Back to Backups
+        </a>
+        <button class="btn btn-success" onclick="createManualBackup()">
+            <i class="bi bi-plus-circle"></i> Create Backup
+        </button>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card shadow mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Directory Information</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-striped">
+                    <tr>
+                        <th>Backup Directory:</th>
+                        <td>{{ debug_info.backup_dir_path }}</td>
+                    </tr>
+                    <tr>
+                        <th>Backup Directory Exists:</th>
+                        <td>
+                            {% if debug_info.backup_dir_exists %}
+                                <span class="badge bg-success">Yes</span>
+                            {% else %}
+                                <span class="badge bg-danger">No</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Backup Directory Permissions:</th>
+                        <td>
+                            {% if debug_info.backup_dir_permissions %}
+                                <span class="badge bg-info">{{ debug_info.backup_dir_permissions }}</span>
+                            {% else %}
+                                <span class="badge bg-secondary">Unknown</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>nftables Config:</th>
+                        <td>{{ debug_info.nft_conf_path }}</td>
+                    </tr>
+                    <tr>
+                        <th>nftables Config Exists:</th>
+                        <td>
+                            {% if debug_info.nft_conf_exists %}
+                                <span class="badge bg-success">Yes</span>
+                            {% else %}
+                                <span class="badge bg-danger">No</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>nftables Config Permissions:</th>
+                        <td>
+                            {% if debug_info.nft_conf_permissions %}
+                                <span class="badge bg-info">{{ debug_info.nft_conf_permissions }}</span>
+                            {% else %}
+                                <span class="badge bg-secondary">Unknown</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Database:</th>
+                        <td>{{ debug_info.db_path }}</td>
+                    </tr>
+                    <tr>
+                        <th>Database Exists:</th>
+                        <td>
+                            {% if debug_info.db_exists %}
+                                <span class="badge bg-success">Yes</span>
+                            {% else %}
+                                <span class="badge bg-danger">No</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Database Permissions:</th>
+                        <td>
+                            {% if debug_info.db_permissions %}
+                                <span class="badge bg-info">{{ debug_info.db_permissions }}</span>
+                            {% else %}
+                                <span class="badge bg-secondary">Unknown</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Current User:</th>
+                        <td>{{ debug_info.current_user }}</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card shadow mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Backup Test Result</h5>
+            </div>
+            <div class="card-body">
+                <table class="table table-striped">
+                    <tr>
+                        <th>Test Backup Success:</th>
+                        <td>
+                            {% if debug_info.test_backup_success %}
+                                <span class="badge bg-success">Yes</span>
+                            {% else %}
+                                <span class="badge bg-danger">No</span>
+                            {% endif %}
+                        </td>
+                    </tr>
+                    <tr>
+                        <th>Test Backup Message:</th>
+                        <td>{{ debug_info.test_backup_message }}</td>
+                    </tr>
+                </table>
+            </div>
+        </div>
+        
+        <div class="card shadow mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">Backup Directory Contents</h5>
+            </div>
+            <div class="card-body">
+                {% if debug_info.backup_dir_contents %}
+                    <div class="mb-3">
+                        <strong>All files/directories:</strong>
+                        <div class="bg-light p-2 rounded">
+                            <code>{{ debug_info.backup_dir_contents|join(', ') }}</code>
+                        </div>
+                    </div>
+                {% endif %}
+                
+                {% if debug_info.backup_dirs %}
+                    <div class="table-responsive">
+                        <table class="table table-striped">
+                            <thead>
+                                <tr>
+                                    <th>Backup Name</th>
+                                    <th>Size (bytes)</th>
+                                    <th>Created</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                {% for backup in debug_info.backup_dirs %}
+                                <tr>
+                                    <td>{{ backup.name }}</td>
+                                    <td>{{ backup.size }}</td>
+                                    <td>{{ backup.created }}</td>
+                                </tr>
+                                {% endfor %}
+                            </tbody>
+                        </table>
+                    </div>
+                {% else %}
+                    <div class="alert alert-warning">
+                        <i class="bi bi-exclamation-triangle"></i> No backup directories found
+                    </div>
+                {% endif %}
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow mt-4">
+    <div class="card-header">
+        <h5 class="card-title mb-0">Manual Commands</h5>
+    </div>
+    <div class="card-body">
+        <div class="bg-light p-3 rounded">
+            <code>
+                # Check backup directory<br>
+                ls -la {{ debug_info.backup_dir_path }}<br><br>
+                
+                # Check nftables config<br>
+                ls -la {{ debug_info.nft_conf_path }}<br><br>
+                
+                # Check database<br>
+                ls -la {{ debug_info.db_path }}<br><br>
+                
+                # Create backup directory manually<br>
+                sudo mkdir -p {{ debug_info.backup_dir_path }}<br><br>
+                
+                # Set permissions<br>
+                sudo chown -R $USER:$USER {{ debug_info.backup_dir_path }}<br><br>
+                
+                # Create empty nftables config if not exists<br>
+                sudo touch {{ debug_info.nft_conf_path }} && sudo chown $USER:$USER {{ debug_info.nft_conf_path }}<br><br>
+                
+                # Test backup manually<br>
+                mkdir -p {{ debug_info.backup_dir_path }}/test_backup_$(date +%Y%m%d_%H%M%S)<br>
+                cp {{ debug_info.nft_conf_path }} {{ debug_info.backup_dir_path }}/test_backup_$(date +%Y%m%d_%H%M%S)/<br>
+                cp {{ debug_info.db_path }} {{ debug_info.backup_dir_path }}/test_backup_$(date +%Y%m%d_%H%M%S)/<br>
+            </code>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow mt-4">
+    <div class="card-header">
+        <h5 class="card-title mb-0">Troubleshooting Steps</h5>
+    </div>
+    <div class="card-body">
+        <ol>
+            <li><strong>Check Directory Permissions:</strong>
+                <p>The backup directory must be writable by the application user. Current permissions: 
+                {% if debug_info.backup_dir_permissions %}{{ debug_info.backup_dir_permissions }}{% else %}Unknown{% endif %}</p>
+                <code>sudo chown -R $USER:$USER /etc/nftables.d</code>
+            </li>
+            
+            <li><strong>Create Missing Files:</strong>
+                <p>If nftables config or database doesn't exist, create empty files first:</p>
+                <code>sudo touch /etc/nftables.conf && sudo chown $USER:$USER /etc/nftables.conf</code>
+            </li>
+            
+            <li><strong>Check Application Logs:</strong>
+                <p>Check the application logs for detailed error messages:</p>
+                <code>tail -f nftables_manager.log</code>
+            </li>
+            
+            <li><strong>Run as Root:</strong>
+                <p>If permission issues persist, try running the application as root:</p>
+                <code>sudo python app.py</code>
+            </li>
+            
+            <li><strong>Manual Test:</strong>
+                <p>Try creating a backup manually using the commands above to test if the directory and permissions work correctly.</p>
+            </li>
+        </ol>
+    </div>
+</div>
+
+<script>
+    function createManualBackup() {
+        fetch('/api/create-backup', {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                alert('Backup created successfully!');
+                location.reload();
+            } else {
+                alert('Failed to create backup: ' + data.message);
+            }
+        })
+        .catch(error => {
+            console.error('Error:', error);
+            alert('Error creating backup');
+        });
+    }
+</script>
+{% endblock %}

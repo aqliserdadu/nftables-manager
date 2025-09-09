@@ -1,0 +1,174 @@
+{% extends "base.html" %}
+
+{% block title %}Configuration{% endblock %}
+
+{% block content %}
+<div class="d-flex justify-content-between align-items-center mb-4">
+    <h2><i class="bi bi-gear"></i> Configuration</h2>
+    <div>
+        <a href="{{ url_for('backups') }}" class="btn btn-info me-2">
+            <i class="bi bi-clock-history"></i> View Backups
+        </a>
+        <a href="{{ url_for('dashboard') }}" class="btn btn-secondary me-2">
+            <i class="bi bi-arrow-left"></i> Back to Dashboard
+        </a>
+        <form method="POST" action="{{ url_for('apply_rules') }}" class="d-inline">
+            <button type="submit" class="btn btn-primary">
+                <i class="bi bi-arrow-clockwise"></i> Apply Rules
+            </button>
+        </form>
+    </div>
+</div>
+
+<div class="row">
+    <div class="col-md-6">
+        <div class="card shadow mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">File Locations</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Rules File:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" value="{{ rules_file }}" readonly>
+                        <button class="btn btn-outline-secondary" type="button" onclick="copyToClipboard('{{ rules_file }}')">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">nftables Configuration:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" value="{{ nft_conf }}" readonly>
+                        <button class="btn btn-outline-secondary" type="button" onclick="copyToClipboard('{{ nft_conf }}')">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Backup Directory:</label>
+                    <div class="input-group">
+                        <input type="text" class="form-control" value="{{ backup_dir }}" readonly>
+                        <button class="btn btn-outline-secondary" type="button" onclick="copyToClipboard('{{ backup_dir }}')">
+                            <i class="bi bi-clipboard"></i>
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
+    <div class="col-md-6">
+        <div class="card shadow mb-4">
+            <div class="card-header">
+                <h5 class="card-title mb-0">System Information</h5>
+            </div>
+            <div class="card-body">
+                <div class="mb-3">
+                    <label class="form-label">Application Status:</label>
+                    <div class="alert alert-success d-flex align-items-center" role="alert">
+                        <i class="bi bi-check-circle-fill me-2"></i>
+                        Running
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">nftables Service:</label>
+                    <div id="nftables-status" class="d-flex align-items-center">
+                        <div class="spinner-border spinner-border-sm me-2" role="status">
+                            <span class="visually-hidden">Loading...</span>
+                        </div>
+                        <span>Checking...</span>
+                    </div>
+                </div>
+                
+                <div class="mb-3">
+                    <label class="form-label">Service Details:</label>
+                    <div id="service-details" class="small text-muted">
+                        Waiting for status check...
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<div class="card shadow">
+    <div class="card-header">
+        <h5 class="card-title mb-0">Troubleshooting</h5>
+    </div>
+    <div class="card-body">
+        <h6>Common Issues:</h6>
+        <ul>
+            <li><strong>Permission Denied:</strong> Make sure the application has permission to write to /etc/nftables.d/</li>
+            <li><strong>Directory Not Found:</strong> The application will automatically create the /etc/nftables.d/ directory</li>
+            <li><strong>nftables Service:</strong> Ensure nftables service is installed and running</li>
+        </ul>
+        
+        <h6 class="mt-4">Manual Commands:</h6>
+        <div class="bg-light p-3 rounded">
+            <code>
+                # Create directory manually<br>
+                sudo mkdir -p /etc/nftables.d/<br><br>
+                
+                # Check nftables status<br>
+                sudo systemctl status nftables<br><br>
+                
+                # Enable nftables service<br>
+                sudo systemctl enable nftables<br><br>
+                
+                # Start nftables service<br>
+                sudo systemctl start nftables<br><br>
+                
+                # View current rules<br>
+                sudo nft list ruleset
+            </code>
+        </div>
+    </div>
+</div>
+
+<script>
+    function copyToClipboard(text) {
+        navigator.clipboard.writeText(text).then(function() {
+            alert('Copied to clipboard!');
+        }, function(err) {
+            console.error('Could not copy text: ', err);
+        });
+    }
+    
+    // Check nftables service status
+    fetch('/api/nftables-status')
+        .then(response => response.json())
+        .then(data => {
+            const statusDiv = document.getElementById('nftables-status');
+            const detailsDiv = document.getElementById('service-details');
+            
+            if (!data.installed) {
+                statusDiv.innerHTML = '<i class="bi bi-x-circle-fill text-danger me-2"></i><span>Not Installed</span>';
+                detailsDiv.innerHTML = data.message;
+            } else if (data.active) {
+                statusDiv.innerHTML = '<i class="bi bi-check-circle-fill text-success me-2"></i><span>Active</span>';
+                detailsDiv.innerHTML = `
+                    <strong>Enabled:</strong> ${data.enabled ? 'Yes' : 'No'}<br>
+                    <strong>Status:</strong> Active<br>
+                    <strong>Details:</strong> ${data.message.substring(0, 100)}...
+                `;
+            } else {
+                statusDiv.innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning me-2"></i><span>Inactive</span>';
+                detailsDiv.innerHTML = `
+                    <strong>Enabled:</strong> ${data.enabled ? 'Yes' : 'No'}<br>
+                    <strong>Status:</strong> Inactive<br>
+                    <strong>Details:</strong> ${data.message.substring(0, 100)}...
+                `;
+            }
+        })
+        .catch(error => {
+            console.error('Error checking nftables status:', error);
+            const statusDiv = document.getElementById('nftables-status');
+            statusDiv.innerHTML = '<i class="bi bi-exclamation-triangle-fill text-warning me-2"></i><span>Error</span>';
+            document.getElementById('service-details').innerHTML = 'Failed to check service status';
+        });
+</script>
+{% endblock %}
