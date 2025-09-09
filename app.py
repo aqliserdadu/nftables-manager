@@ -13,7 +13,6 @@ logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-
 # Tambahkan console handler untuk debugging
 console = logging.StreamHandler()
 console.setLevel(logging.DEBUG)
@@ -446,6 +445,68 @@ def init_db():
             c.execute("INSERT INTO rule_groups (name, description, color) VALUES (?, ?, ?)",
                      (name, desc, color))
     
+    # Tambahkan aturan default untuk port 5000 jika belum ada
+    c.execute("""
+        SELECT COUNT(*) FROM rules 
+        WHERE name = 'Allow Web Management' AND dport = '5000'
+    """)
+    rule_count = c.fetchone()[0]
+    
+    if rule_count == 0:
+        # Dapatkan ID grup Services
+        c.execute("SELECT id FROM rule_groups WHERE name = 'Services'")
+        services_group = c.fetchone()
+        group_id = services_group[0] if services_group else None
+        
+        # Tambahkan aturan default untuk port 5000
+        c.execute("""
+            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            'Allow Web Management',  # name
+            group_id,                # group_id
+            'input',                 # chain
+            None,                    # src (semua sumber)
+            None,                    # dst (semua tujuan)
+            '5000',                  # dport
+            'tcp',                   # protocol
+            'accept',                # action
+            'Allow access to web management interface',  # comment
+            True                     # enabled
+        ))
+        logging.info("Added default rule for port 5000 (Web Management)")
+    
+    # Tambahkan aturan default untuk ICMP (ping) jika belum ada
+    c.execute("""
+        SELECT COUNT(*) FROM rules 
+        WHERE name = 'Allow ICMP (Ping)' AND protocol = 'icmp'
+    """)
+    icmp_rule_count = c.fetchone()[0]
+    
+    if icmp_rule_count == 0:
+        # Dapatkan ID grup Management
+        c.execute("SELECT id FROM rule_groups WHERE name = 'Management'")
+        management_group = c.fetchone()
+        group_id = management_group[0] if management_group else None
+        
+        # Tambahkan aturan default untuk ICMP
+        c.execute("""
+            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            'Allow ICMP (Ping)',     # name
+            group_id,                # group_id
+            'input',                 # chain
+            None,                    # src (semua sumber)
+            None,                    # dst (semua tujuan)
+            None,                    # dport (tidak ada port untuk ICMP)
+            'icmp',                  # protocol
+            'accept',                # action
+            'Allow ICMP echo requests for monitoring and troubleshooting',  # comment
+            True                     # enabled
+        ))
+        logging.info("Added default rule for ICMP (Ping)")
+    
     conn.commit()
     conn.close()
     
@@ -592,10 +653,8 @@ def save_rules():
         
         # Buat header konfigurasi
         config = """#!/usr/sbin/nft -f
-
 # Hapus semua aturan yang ada
 flush ruleset
-
 # Tabel baru
 table inet filter {
     chain input {
@@ -632,16 +691,21 @@ table inet filter {
             if rule['dst']:
                 rule_str += f"ip daddr {rule['dst']} "
             
-            # Protocol
-            if rule['protocol']:
+            # Protocol dan Destination port - PERBAIKAN UNTUK ICMP
+            if rule['protocol'] and rule['protocol'].lower() == 'icmp':
+                # Untuk ICMP, gunakan format khusus
+                rule_str += "icmp type echo-request accept"
+            elif rule['dport']:
+                # Jika port diisi tetapi protocol tidak, gunakan tcp sebagai default
+                protocol = rule['protocol'] if rule['protocol'] else 'tcp'
+                rule_str += f"{protocol} dport {rule['dport']} "
+            elif rule['protocol']:
+                # Jika hanya protocol yang diisi
                 rule_str += f"{rule['protocol']} "
             
-            # Destination port
-            if rule['dport']:
-                rule_str += f"dport {rule['dport']} "
-            
-            # Action
-            rule_str += rule['action']
+            # Jika bukan ICMP, tambahkan action
+            if not (rule['protocol'] and rule['protocol'].lower() == 'icmp'):
+                rule_str += rule['action']
             
             # Comment
             if rule['comment']:
@@ -824,6 +888,12 @@ def add_rule_route():
         comment = request.form['comment']
         enabled = 'enabled' in request.form
         
+        # Validasi: jika dport diisi, protocol juga harus diisi
+        if dport and not protocol:
+            flash('Protocol is required when specifying a port!', 'danger')
+            return render_template('add_rule.html', groups=groups, 
+                                  form_data=request.form)
+        
         try:
             # Tambah aturan ke database
             rule_id = add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
@@ -865,6 +935,12 @@ def edit_rule(rule_id):
         action = request.form['action']
         comment = request.form['comment']
         enabled = 'enabled' in request.form
+        
+        # Validasi: jika dport diisi, protocol juga harus diisi
+        if dport and not protocol:
+            flash('Protocol is required when specifying a port!', 'danger')
+            return render_template('edit_rule.html', rule=rule, groups=groups, 
+                                  form_data=request.form)
         
         try:
             # Update aturan di database
@@ -1100,7 +1176,9 @@ def debug_backup():
         'current_user': os.getenv('USER', 'unknown'),
         'backup_dir_permissions': None,
         'nft_conf_permissions': None,
-        'db_permissions': None
+        'db_permissions': None,
+        'test_backup_success': None,
+        'test_backup_message': None
     }
     
     # Cek permissions
@@ -1139,10 +1217,16 @@ def debug_backup():
         except Exception as e:
             debug_info['error'] = str(e)
     
-    # Test backup
-    # backup_success, backup_message = backup_config()
-    # debug_info['test_backup_success'] = backup_success
-    # debug_info['test_backup_message'] = backup_message
+    # Test backup - PERBAIKAN: Uncomment dan tambahkan error handling
+    try:
+        backup_success, backup_message = backup_config()
+        debug_info['test_backup_success'] = backup_success
+        debug_info['test_backup_message'] = backup_message
+        logging.info(f"Test backup result: {backup_success}, {backup_message}")
+    except Exception as e:
+        debug_info['test_backup_success'] = False
+        debug_info['test_backup_message'] = str(e)
+        logging.error(f"Error in test backup: {e}")
     
     return render_template('debug_backup.html', debug_info=debug_info)
 
@@ -1203,4 +1287,12 @@ def api_nftables_status():
 if __name__ == "__main__":
     logging.info("=== Starting nftables Manager application ===")
     init_db()
+    
+    # Pastikan aturan default sudah diaplikasikan
+    success, message = save_rules()
+    if success:
+        logging.info("Default rules applied successfully")
+    else:
+        logging.error(f"Failed to apply default rules: {message}")
+    
     app.run(host="0.0.0.0", port=5000, debug=True)
