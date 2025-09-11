@@ -6,42 +6,39 @@ import shutil
 from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import logging
-
+import secrets
 # Konfigurasi logging
 logging.basicConfig(
-    filename='nftables_manager.log',
-    level=logging.DEBUG,
+    filename='/var/log/nftables_manager.log',
+    level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
 # Tambahkan console handler untuk debugging
 console = logging.StreamHandler()
-console.setLevel(logging.DEBUG)
+console.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console.setFormatter(formatter)
 logging.getLogger('').addHandler(console)
-
 app = Flask(__name__)
-app.secret_key = 'your_secret_key_here'
-
+# Generate random secret key for security
+app.secret_key = secrets.token_hex(32)
 # Konfigurasi Database
-DB_FILE = "firewall.db"
+DB_FILE = "/var/lib/nftables_manager/firewall.db"
 RULES_FILE = "/etc/nftables.d/custom.nft"
 NFT_CONF = "/etc/nftables.conf"
 BACKUP_DIR = "/etc/nftables.d/backups"
-
 # Fungsi untuk membuat direktori jika belum ada
 def ensure_directory_exists(path):
     directory = os.path.dirname(path)
     if not os.path.exists(directory):
         try:
-            os.makedirs(directory, mode=0o755)
+            os.makedirs(directory, mode=0o750)  # More restrictive permissions
             logging.info(f"Created directory: {directory}")
             return True
         except Exception as e:
             logging.error(f"Error creating directory {directory}: {e}")
             return False
     return True
-
 # Fungsi backup konfigurasi dan database
 def backup_config():
     """Backup konfigurasi nftables dan database"""
@@ -65,7 +62,7 @@ def backup_config():
         backup_subdir = os.path.join(BACKUP_DIR, f"backup_{timestamp}")
         
         try:
-            os.makedirs(backup_subdir, mode=0o755)
+            os.makedirs(backup_subdir, mode=0o750)
             logging.info(f"Created backup subdirectory: {backup_subdir}")
         except Exception as e:
             logging.error(f"Error creating backup subdirectory: {e}")
@@ -76,6 +73,7 @@ def backup_config():
             nft_backup_file = os.path.join(backup_subdir, "nftables.conf")
             try:
                 shutil.copy2(NFT_CONF, nft_backup_file)
+                os.chmod(nft_backup_file, 0o640)  # Secure permissions
                 logging.info(f"Backed up nftables config to {nft_backup_file}")
             except Exception as e:
                 logging.error(f"Error backing up nftables config: {e}")
@@ -87,6 +85,7 @@ def backup_config():
             try:
                 with open(nft_backup_file, 'w') as f:
                     f.write("# Empty nftables config\n")
+                os.chmod(nft_backup_file, 0o640)
                 logging.info(f"Created empty nftables config file: {nft_backup_file}")
             except Exception as e:
                 logging.error(f"Error creating empty nftables config: {e}")
@@ -96,6 +95,7 @@ def backup_config():
             db_backup_file = os.path.join(backup_subdir, "firewall.db")
             try:
                 shutil.copy2(DB_FILE, db_backup_file)
+                os.chmod(db_backup_file, 0o640)  # Secure permissions
                 logging.info(f"Backed up database to {db_backup_file}")
             except Exception as e:
                 logging.error(f"Error backing up database: {e}")
@@ -108,6 +108,7 @@ def backup_config():
                 # Buat database kosong
                 conn = sqlite3.connect(db_backup_file)
                 conn.close()
+                os.chmod(db_backup_file, 0o640)
                 logging.info(f"Created empty database file: {db_backup_file}")
             except Exception as e:
                 logging.error(f"Error creating empty database: {e}")
@@ -120,6 +121,7 @@ def backup_config():
                 f.write(f"nftables config: {NFT_CONF}\n")
                 f.write(f"Database: {DB_FILE}\n")
                 f.write(f"User: {session.get('username', 'Unknown')}\n")
+            os.chmod(info_file, 0o640)
             logging.info(f"Created backup info file: {info_file}")
         except Exception as e:
             logging.error(f"Error creating backup info file: {e}")
@@ -139,7 +141,6 @@ def backup_config():
     except Exception as e:
         logging.error(f"Unexpected error in backup_config: {e}")
         return False, f"Unexpected error: {e}"
-
 # Fungsi untuk mendapatkan daftar backup
 def get_backup_list():
     """Mendapatkan daftar backup yang tersedia"""
@@ -197,7 +198,6 @@ def get_backup_list():
         logging.error(f"Error getting backup list: {e}")
     
     return backups
-
 # Fungsi untuk menghapus backup
 def delete_backup(backup_path):
     """Hapus direktori backup"""
@@ -226,7 +226,6 @@ def delete_backup(backup_path):
     except Exception as e:
         logging.error(f"Unexpected error in delete_backup: {e}")
         return False, f"Unexpected error: {e}"
-
 # Fungsi restore dari backup
 def restore_from_backup(backup_path):
     """Restore konfigurasi dan database dari backup"""
@@ -252,14 +251,13 @@ def restore_from_backup(backup_path):
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     pre_restore_db_backup = f"{DB_FILE}.prerestore_{timestamp}"
                     shutil.copy2(DB_FILE, pre_restore_db_backup)
+                    os.chmod(pre_restore_db_backup, 0o640)
                     logging.info(f"Pre-restore database backup: {pre_restore_db_backup}")
                 
                 # Restore database
                 shutil.copy2(db_backup_file, DB_FILE)
+                os.chmod(DB_FILE, 0o640)
                 logging.info(f"Restored database from {db_backup_file}")
-                
-                # Set permissions
-                os.chmod(DB_FILE, 0o644)
                 
             except Exception as e:
                 logging.error(f"Error restoring database: {e}")
@@ -272,10 +270,8 @@ def restore_from_backup(backup_path):
         if os.path.exists(nft_backup_file):
             try:
                 shutil.copy2(nft_backup_file, NFT_CONF)
+                os.chmod(NFT_CONF, 0o640)
                 logging.info(f"Restored nftables config from {nft_backup_file}")
-                
-                # Set permissions
-                os.chmod(NFT_CONF, 0o644)
                 
             except Exception as e:
                 logging.error(f"Error restoring nftables config: {e}")
@@ -295,13 +291,12 @@ def restore_from_backup(backup_path):
     except Exception as e:
         logging.error(f"Error restoring from backup: {e}")
         return False, f"Error restoring from backup: {e}"
-
 # Fungsi untuk mengecek status nftables
 def check_nftables_status():
     """Mengecek status service nftables"""
     try:
         # Cek apakah service nftables ada
-        check_service = subprocess.run(['systemctl', 'is-enabled', 'nftables'], 
+        check_service = subprocess.run(['/usr/bin/systemctl', 'is-enabled', 'nftables'], 
                                      capture_output=True, text=True)
         
         if check_service.returncode != 0:
@@ -313,19 +308,19 @@ def check_nftables_status():
             }
         
         # Cek status service
-        status_result = subprocess.run(['systemctl', 'is-active', 'nftables'], 
+        status_result = subprocess.run(['/usr/bin/systemctl', 'is-active', 'nftables'], 
                                     capture_output=True, text=True)
         
         is_active = status_result.returncode == 0
         
         # Cek apakah service enabled
-        enabled_result = subprocess.run(['systemctl', 'is-enabled', 'nftables'], 
+        enabled_result = subprocess.run(['/usr/bin/systemctl', 'is-enabled', 'nftables'], 
                                       capture_output=True, text=True)
         
         is_enabled = enabled_result.returncode == 0
         
         # Dapatkan detail status
-        status_detail = subprocess.run(['systemctl', 'status', 'nftables'], 
+        status_detail = subprocess.run(['/usr/bin/systemctl', 'status', 'nftables'], 
                                     capture_output=True, text=True)
         
         return {
@@ -342,7 +337,6 @@ def check_nftables_status():
             'active': False,
             'message': str(e)
         }
-
 # Fungsi untuk mengubah password user
 def change_password(user_id, current_password, new_password):
     """Mengubah password user"""
@@ -378,7 +372,6 @@ def change_password(user_id, current_password, new_password):
         conn.close()
         logging.error(f"Error changing password: {e}")
         return False, f"Error changing password: {e}"
-
 # Inisialisasi Database
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -445,10 +438,41 @@ def init_db():
             c.execute("INSERT INTO rule_groups (name, description, color) VALUES (?, ?, ?)",
                      (name, desc, color))
     
-    # Tambahkan aturan default untuk port 5000 jika belum ada
+    # Tambahkan aturan default untuk port 22 (SSH) jika belum ada
     c.execute("""
         SELECT COUNT(*) FROM rules 
-        WHERE name = 'Allow Web Management' AND dport = '5000'
+        WHERE name = 'Allow SSH' AND dport = '22'
+    """)
+    ssh_rule_count = c.fetchone()[0]
+    
+    if ssh_rule_count == 0:
+        # Dapatkan ID grup Management
+        c.execute("SELECT id FROM rule_groups WHERE name = 'Management'")
+        management_group = c.fetchone()
+        group_id = management_group[0] if management_group else None
+        
+        # Tambahkan aturan default untuk port 22 (SSH)
+        c.execute("""
+            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            'Allow SSH',             # name
+            group_id,                # group_id
+            'input',                 # chain
+            None,                    # src (semua sumber)
+            None,                    # dst (semua tujuan)
+            '22',                    # dport
+            'tcp',                   # protocol
+            'accept',                # action
+            'Allow SSH access for remote administration',  # comment
+            True                     # enabled
+        ))
+        logging.info("Added default rule for port 22 (SSH)")
+    
+    # Tambahkan aturan default untuk port 2107 jika belum ada
+    c.execute("""
+        SELECT COUNT(*) FROM rules 
+        WHERE name = 'Allow Web Management' AND dport = '2107'
     """)
     rule_count = c.fetchone()[0]
     
@@ -458,7 +482,7 @@ def init_db():
         services_group = c.fetchone()
         group_id = services_group[0] if services_group else None
         
-        # Tambahkan aturan default untuk port 5000
+        # Tambahkan aturan default untuk port 2107
         c.execute("""
             INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
@@ -468,13 +492,13 @@ def init_db():
             'input',                 # chain
             None,                    # src (semua sumber)
             None,                    # dst (semua tujuan)
-            '5000',                  # dport
+            '2107',                  # dport
             'tcp',                   # protocol
             'accept',                # action
             'Allow access to web management interface',  # comment
             True                     # enabled
         ))
-        logging.info("Added default rule for port 5000 (Web Management)")
+        logging.info("Added default rule for port 2107 (Web Management)")
     
     # Tambahkan aturan default untuk ICMP (ping) jika belum ada
     c.execute("""
@@ -538,10 +562,10 @@ def init_db():
         try:
             with open(NFT_CONF, 'w') as f:
                 f.write("# Empty nftables config\n")
+            os.chmod(NFT_CONF, 0o640)
             logging.info(f"Created empty nftables config file: {NFT_CONF}")
         except Exception as e:
             logging.error(f"Error creating empty nftables config: {e}")
-
 # Fungsi Database
 def get_groups():
     conn = sqlite3.connect(DB_FILE)
@@ -551,7 +575,6 @@ def get_groups():
     rows = c.fetchall()
     conn.close()
     return rows
-
 def get_group(group_id):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -560,7 +583,6 @@ def get_group(group_id):
     row = c.fetchone()
     conn.close()
     return row
-
 def get_rules(group_id=None):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -585,7 +607,6 @@ def get_rules(group_id=None):
     rows = c.fetchall()
     conn.close()
     return rows
-
 def get_rule(rule_id):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -599,7 +620,6 @@ def get_rule(rule_id):
     row = c.fetchone()
     conn.close()
     return row
-
 def add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, comment, enabled=True):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -611,7 +631,6 @@ def add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, com
     rule_id = c.lastrowid
     conn.close()
     return rule_id
-
 def update_rule_in_db(rule_id, name, group_id, chain, src, dst, dport, protocol, action, comment, enabled):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
@@ -622,21 +641,18 @@ def update_rule_in_db(rule_id, name, group_id, chain, src, dst, dport, protocol,
     """, (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, rule_id))
     conn.commit()
     conn.close()
-
 def delete_rule_from_db(rule_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("DELETE FROM rules WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
-
 def toggle_rule_in_db(rule_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE rules SET enabled = NOT enabled, updated_at=CURRENT_TIMESTAMP WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
-
 # Fungsi nftables
 def save_rules():
     """Simpan aturan ke file dan reload nftables"""
@@ -733,6 +749,7 @@ table inet filter {
         try:
             with open(RULES_FILE, "w") as f:
                 f.write(config)
+            os.chmod(RULES_FILE, 0o640)  # Secure permissions
             logging.info(f"Rules saved to {RULES_FILE}")
             
             # Reload nftables
@@ -748,7 +765,6 @@ table inet filter {
     except Exception as e:
         logging.error(f"Unexpected error in save_rules: {e}")
         return False, f"Unexpected error: {e}"
-
 def reload_nft():
     """Reload konfigurasi nftables"""
     try:
@@ -757,7 +773,7 @@ def reload_nft():
         # Salin konfigurasi baru
         logging.info(f"Copying {RULES_FILE} to {NFT_CONF}")
         try:
-            subprocess.run(["sudo", "cp", RULES_FILE, NFT_CONF], check=True)
+            subprocess.run(["/usr/bin/cp", RULES_FILE, NFT_CONF], check=True)
             logging.info("File copy successful")
         except subprocess.CalledProcessError as e:
             logging.error(f"Error copying file: {e}")
@@ -766,7 +782,7 @@ def reload_nft():
         # Reload nftables
         logging.info("Restarting nftables service...")
         try:
-            result = subprocess.run(["sudo", "systemctl", "restart", "nftables"], 
+            result = subprocess.run(["/usr/bin/systemctl", "restart", "nftables"], 
                                   capture_output=True, text=True)
             if result.returncode != 0:
                 logging.error(f"Error restarting nftables: {result.stderr}")
@@ -780,7 +796,6 @@ def reload_nft():
     except Exception as e:
         logging.error(f"Unexpected error in reload_nft: {e}")
         return False, f"Unexpected error: {e}"
-
 # Autentikasi
 def login_required(f):
     def decorated_function(*args, **kwargs):
@@ -790,14 +805,12 @@ def login_required(f):
         return f(*args, **kwargs)
     decorated_function.__name__ = f.__name__
     return decorated_function
-
 # Routes
 @app.route('/')
 def index():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
-
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -813,6 +826,7 @@ def login():
         if user and check_password_hash(user[2], password):
             session['user_id'] = user[0]
             session['username'] = user[1]
+            session.permanent = True  # Make session permanent
             flash('Login successful!', 'success')
             logging.info(f"User {username} logged in")
             return redirect(url_for('dashboard'))
@@ -821,7 +835,6 @@ def login():
             logging.warning(f"Failed login attempt for username: {username}")
     
     return render_template('login.html')
-
 @app.route('/logout')
 def logout():
     username = session.get('username', 'Unknown')
@@ -829,7 +842,6 @@ def logout():
     flash('You have been logged out', 'info')
     logging.info(f"User {username} logged out")
     return redirect(url_for('login'))
-
 @app.route('/change_password', methods=['GET', 'POST'])
 @login_required
 def change_password_route():
@@ -843,8 +855,8 @@ def change_password_route():
             flash('New password and confirmation do not match!', 'danger')
             return render_template('change_password.html')
         
-        if len(new_password) < 6:
-            flash('Password must be at least 6 characters long!', 'danger')
+        if len(new_password) < 8:  # Increased minimum password length
+            flash('Password must be at least 8 characters long!', 'danger')
             return render_template('change_password.html')
         
         # Ubah password
@@ -857,7 +869,6 @@ def change_password_route():
             flash(message, 'danger')
     
     return render_template('change_password.html')
-
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -870,7 +881,6 @@ def dashboard():
                           rules=rules, 
                           groups=groups, 
                           selected_group=selected_group)
-
 @app.route('/add_rule', methods=['GET', 'POST'])
 @login_required
 def add_rule_route():
@@ -913,7 +923,6 @@ def add_rule_route():
             flash(f'Error adding rule: {e}', 'danger')
     
     return render_template('add_rule.html', groups=groups)
-
 @app.route('/edit/<int:rule_id>', methods=['GET', 'POST'])
 @login_required
 def edit_rule(rule_id):
@@ -961,7 +970,6 @@ def edit_rule(rule_id):
             flash(f'Error updating rule: {e}', 'danger')
     
     return render_template('edit_rule.html', rule=rule, groups=groups)
-
 @app.route('/delete/<int:rule_id>')
 @login_required
 def delete_rule_route(rule_id):
@@ -982,7 +990,6 @@ def delete_rule_route(rule_id):
         flash(f'Error deleting rule: {e}', 'danger')
     
     return redirect(url_for('dashboard'))
-
 @app.route('/toggle/<int:rule_id>')
 @login_required
 def toggle_rule_route(rule_id):
@@ -1003,13 +1010,11 @@ def toggle_rule_route(rule_id):
         flash(f'Error toggling rule: {e}', 'danger')
     
     return redirect(url_for('dashboard'))
-
 @app.route('/groups')
 @login_required
 def manage_groups():
     groups = get_groups()
     return render_template('groups.html', groups=groups)
-
 @app.route('/add_group', methods=['GET', 'POST'])
 @login_required
 def add_group():
@@ -1033,7 +1038,6 @@ def add_group():
             conn.close()
     
     return render_template('add_group.html')
-
 @app.route('/edit_group/<int:group_id>', methods=['GET', 'POST'])
 @login_required
 def edit_group(group_id):
@@ -1064,7 +1068,6 @@ def edit_group(group_id):
             conn.close()
     
     return render_template('edit_group.html', group=group)
-
 @app.route('/delete_group/<int:group_id>')
 @login_required
 def delete_group(group_id):
@@ -1087,13 +1090,12 @@ def delete_group(group_id):
         logging.info(f"Deleted group ID: {group_id}")
     
     return redirect(url_for('manage_groups'))
-
 @app.route('/status')
 @login_required
 def status():
     try:
-        result = subprocess.run(['sudo', 'nft', 'list', 'ruleset'], 
-                              capture_output=True, text=True, check=True)
+        result = subprocess.run(['/usr/sbin/nft', 'list', 'ruleset'], 
+                                capture_output=True, text=True, check=True)
         return render_template('status.html', ruleset=result.stdout)
     except subprocess.CalledProcessError as e:
         flash(f'Error getting nftables status: {e}', 'danger')
@@ -1106,13 +1108,11 @@ def config():
                           rules_file=RULES_FILE, 
                           nft_conf=NFT_CONF,
                           backup_dir=BACKUP_DIR)
-
 @app.route('/backups')
 @login_required
 def backups():
     backup_list = get_backup_list()
     return render_template('backups.html', backups=backup_list, backup_dir=BACKUP_DIR)
-
 @app.route('/restore/<path:backup_name>')
 @login_required
 def restore_backup(backup_name):
@@ -1131,7 +1131,6 @@ def restore_backup(backup_name):
         flash(message, 'danger')
     
     return redirect(url_for('backups'))
-
 @app.route('/delete_backup/<path:backup_name>')
 @login_required
 def delete_backup_route(backup_name):
@@ -1150,7 +1149,6 @@ def delete_backup_route(backup_name):
         flash(message, 'danger')
     
     return redirect(url_for('backups'))
-
 @app.route('/apply_rules', methods=['POST'])
 @login_required
 def apply_rules():
@@ -1160,7 +1158,6 @@ def apply_rules():
     else:
         flash(f'Failed to apply rules: {message}', 'danger')
     return redirect(url_for('dashboard'))
-
 @app.route('/debug/backup')
 @login_required
 def debug_backup():
@@ -1217,19 +1214,18 @@ def debug_backup():
         except Exception as e:
             debug_info['error'] = str(e)
     
-    # Test backup - PERBAIKAN: Uncomment dan tambahkan error handling
-    try:
-        backup_success, backup_message = backup_config()
-        debug_info['test_backup_success'] = backup_success
-        debug_info['test_backup_message'] = backup_message
-        logging.info(f"Test backup result: {backup_success}, {backup_message}")
-    except Exception as e:
-        debug_info['test_backup_success'] = False
-        debug_info['test_backup_message'] = str(e)
-        logging.error(f"Error in test backup: {e}")
+    # # Test backup
+    # try:
+    #     backup_success, backup_message = backup_config()
+    #     debug_info['test_backup_success'] = backup_success
+    #     debug_info['test_backup_message'] = backup_message
+    #     logging.info(f"Test backup result: {backup_success}, {backup_message}")
+    # except Exception as e:
+    #     debug_info['test_backup_success'] = False
+    #     debug_info['test_backup_message'] = str(e)
+    #     logging.error(f"Error in test backup: {e}")
     
     return render_template('debug_backup.html', debug_info=debug_info)
-
 @app.route('/api/create-backup', methods=['POST'])
 @login_required
 def api_create_backup():
@@ -1239,7 +1235,6 @@ def api_create_backup():
         'success': success,
         'message': message
     })
-
 @app.route('/api/delete-old-backups', methods=['POST'])
 @login_required
 def api_delete_old_backups():
@@ -1275,7 +1270,6 @@ def api_delete_old_backups():
             'success': False,
             'message': str(e)
         })
-
 # API Routes
 @app.route('/api/nftables-status')
 @login_required
@@ -1283,7 +1277,6 @@ def api_nftables_status():
     """API endpoint untuk mengecek status nftables"""
     status = check_nftables_status()
     return jsonify(status)
-
 if __name__ == "__main__":
     logging.info("=== Starting nftables Manager application ===")
     init_db()
@@ -1295,4 +1288,4 @@ if __name__ == "__main__":
     else:
         logging.error(f"Failed to apply default rules: {message}")
     
-    app.run(host="0.0.0.0", port=5000, debug=True)
+    app.run(host="0.0.0.0", port=2107, debug=False)

@@ -1,29 +1,18 @@
 #!/bin/bash
-# =============================================================================
-# nftables Manager Uninstallation Script
-# =============================================================================
-# This script removes the nftables Manager installation
-# 
-# Usage: sudo ./uninstall.sh
-# =============================================================================
-set -e  # Exit on any error
 
-# Colors for output
+# Script uninstallasi untuk nftables Manager
+# Jalankan sebagai root: sudo ./uninstall.sh
+
+set -e  # Exit immediately if a command exits with a non-zero status.
+
+# Warna untuk output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
-BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Configuration variables (must match install script)
-APP_NAME="nftables-manager"
-APP_USER="nftables-manager"
-APP_DIR="/opt/nftables-manager"
-SERVICE_NAME="nftables-manager"
-SERVICE_PORT=5000
-
-# Function to print colored output
-print_status() {
+# Fungsi untuk mencetak pesan dengan warna
+print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
 
@@ -35,122 +24,142 @@ print_error() {
     echo -e "${RED}[ERROR]${NC} $1"
 }
 
-# Check if running as root
+# Cek apakah script dijalankan sebagai root
 if [[ $EUID -ne 0 ]]; then
-    print_error "This script must be run as root"
-    exit 1
+   print_error "Script ini harus dijalankan sebagai root"
+   exit 1
 fi
 
-print_status "Starting nftables Manager uninstallation..."
+print_info "Memulai uninstallasi nftables Manager..."
 
-# Check if the application is installed
-if [[ ! -d "$APP_DIR" ]]; then
-    print_error "nftables Manager is not installed in $APP_DIR"
-    exit 1
-fi
-
-# Stop and disable service
-print_status "Stopping and disabling nftables Manager service..."
-if systemctl is-active --quiet ${SERVICE_NAME}; then
-    systemctl stop ${SERVICE_NAME}
-fi
-
-if systemctl is-enabled --quiet ${SERVICE_NAME}; then
-    systemctl disable ${SERVICE_NAME}
-fi
-
-# Remove systemd service file
-print_status "Removing systemd service..."
-if [[ -f "/etc/systemd/system/${SERVICE_NAME}.service" ]]; then
-    rm -f /etc/systemd/system/${SERVICE_NAME}.service
-    systemctl daemon-reload
-    print_status "Systemd service removed"
+# Hentikan service nftables-manager
+print_info "Menghentikan service nftables-manager..."
+if systemctl is-active --quiet nftables-manager; then
+    systemctl stop nftables-manager
+    print_info "Service nftables-manager telah dihentikan"
 else
-    print_warning "Service file not found"
+    print_warning "Service nftables-manager tidak berjalan"
 fi
 
-# Remove firewall rule for service port
-print_status "Removing firewall rules..."
-if command -v nft &> /dev/null; then
-    # Check if rule exists and remove it
-    if nft list ruleset | grep -q "dport $SERVICE_PORT"; then
-        nft delete rule inet filter input tcp dport $SERVICE_PORT accept
-        print_status "Removed firewall rule for port $SERVICE_PORT"
-    else
-        print_warning "Firewall rule for port $SERVICE_PORT not found"
+# Nonaktifkan service nftables-manager
+print_info "Menonaktifkan service nftables-manager..."
+if systemctl is-enabled --quiet nftables-manager; then
+    systemctl disable nftables-manager
+    print_info "Service nftables-manager telah dinonaktifkan"
+else
+    print_warning "Service nftables-manager tidak diaktifkan"
+fi
+
+# Hapus file service systemd
+print_info "Menghapus file service systemd..."
+if [ -f /etc/systemd/system/nftables-manager.service ]; then
+    rm -f /etc/systemd/system/nftables-manager.service
+    print_info "File service telah dihapus"
+else
+    print_warning "File service tidak ditemukan"
+fi
+
+# Reload systemd
+print_info "Me-reload systemd..."
+systemctl daemon-reload
+
+# Hapus direktori aplikasi
+APP_DIR="/opt/nftables-manager"
+if [ -d "$APP_DIR" ]; then
+    print_info "Menghapus direktori aplikasi di $APP_DIR..."
+    rm -rf "$APP_DIR"
+    print_info "Direktori aplikasi telah dihapus"
+else
+    print_warning "Direktori aplikasi tidak ditemukan"
+fi
+
+# Hapus direktori database
+DB_DIR="/var/lib/nftables_manager"
+if [ -d "$DB_DIR" ]; then
+    print_info "Menghapus direktori database di $DB_DIR..."
+    rm -rf "$DB_DIR"
+    print_info "Direktori database telah dihapus"
+else
+    print_warning "Direktori database tidak ditemukan"
+fi
+
+# Hapus direktori log
+LOG_DIR="/var/log/nftables_manager"
+if [ -d "$LOG_DIR" ]; then
+    print_info "Menghapus direktori log di $LOG_DIR..."
+    rm -rf "$LOG_DIR"
+    print_info "Direktori log telah dihapus"
+else
+    print_warning "Direktori log tidak ditemukan"
+fi
+
+# Hapus direktori konfigurasi nftables
+NFTABLES_DIR="/etc/nftables.d"
+if [ -d "$NFTABLES_DIR" ]; then
+    print_info "Menghapus direktori konfigurasi nftables di $NFTABLES_DIR..."
+    rm -rf "$NFTABLES_DIR"
+    print_info "Direktori konfigurasi nftables telah dihapus"
+else
+    print_warning "Direktori konfigurasi nftables tidak ditemukan"
+fi
+
+# Hapus symlink
+if [ -L /usr/local/bin/nftables-manager ]; then
+    print_info "Menghapus symlink..."
+    rm -f /usr/local/bin/nftables-manager
+    print_info "Symlink telah dihapus"
+else
+    print_warning "Symlink tidak ditemukan"
+fi
+
+
+
+# Tanyakan apakah ingin menghapus nftables
+read -p "Apakah Anda ingin menghapus service nftables? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    print_info "Menghapus service nftables..."
+    if systemctl is-active --quiet nftables; then
+        systemctl stop nftables
+        print_info "Service nftables telah dihentikan"
     fi
     
-    # Save rules
-    nft list ruleset > /etc/nftables/ruleset
-elif command -v iptables &> /dev/null; then
-    # Check if rule exists and remove it
-    if iptables -L INPUT | grep -q "dport $SERVICE_PORT"; then
-        iptables -D INPUT -p tcp --dport $SERVICE_PORT -j ACCEPT
-        print_status "Removed iptables rule for port $SERVICE_PORT"
-    else
-        print_warning "iptables rule for port $SERVICE_PORT not found"
+    if systemctl is-enabled --quiet nftables; then
+        systemctl disable nftables
+        print_info "Service nftables telah dinonaktifkan"
     fi
     
-    # Save rules
-    iptables-save > /etc/iptables/rules.v4
+    # Hapus paket nftables
+    print_info "Menghapus paket nftables..."
+    apt-get remove --purge -y nftables
+    apt-get autoremove -y
+    print_info "Paket nftables telah dihapus"
 else
-    print_warning "No firewall tool found (nftables/iptables)"
+    print_info "Service nftables tidak dihapus"
 fi
 
-# Remove application user
-print_status "Removing application user..."
-if id "$APP_USER" &>/dev/null; then
-    userdel $APP_USER
-    print_status "User $APP_USER removed"
+# Tanyakan apakah ingin menghapus dependensi Python
+read -p "Apakah Anda ingin menghapus dependensi Python? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    print_info "Menghapus dependensi Python..."
+    apt-get remove --purge -y python3-pip python3-venv
+    apt-get autoremove -y
+    print_info "Dependensi Python telah dihapus"
 else
-    print_warning "User $APP_USER not found"
+    print_info "Dependensi Python tidak dihapus"
 fi
 
-# Remove application directory
-print_status "Removing application directory..."
-if [[ -d "$APP_DIR" ]]; then
-    rm -rf $APP_DIR
-    print_status "Application directory $APP_DIR removed"
+# Tanyakan apakah ingin menghapus log dari journalctl
+read -p "Apakah Anda ingin menghapus log dari journalctl? (y/N): " -n 1 -r
+echo
+if [[ $REPLY =~ ^[Yy]$ ]]; then
+    print_info "Menghapus log dari journalctl..."
+    journalctl --vacuum-time=1s -u nftables-manager
+    print_info "Log journalctl telah dihapus"
 else
-    print_warning "Application directory $APP_DIR not found"
+    print_info "Log journalctl tidak dihapus"
 fi
 
-# Remove configuration directories
-print_status "Removing configuration directories..."
-if [[ -d "/etc/nftables.d/backups" ]]; then
-    rm -rf /etc/nftables.d/backups
-    print_status "Configuration directory /etc/nftables.d/backups removed"
-else
-    print_warning "Configuration directory /etc/nftables.d/backups not found"
-fi
-
-# Note: We don't remove /etc/nftables.conf as it might contain system-wide rules
-
-# Check if nftables service should be stopped
-print_status "Checking nftables service status..."
-if systemctl is-active --quiet nftables; then
-    print_warning "nftables service is still running. You may want to stop it if not needed."
-fi
-
-# Uninstallation complete
-print_status "=================================================================="
-print_status "nftables Manager Uninstallation Complete!"
-print_status "=================================================================="
-echo
-print_status "What was removed:"
-echo "  - Systemd service: ${SERVICE_NAME}"
-echo "  - Application directory: $APP_DIR"
-echo "  - Application user: $APP_USER"
-echo "  - Configuration directory: /etc/nftables.d/backups"
-echo "  - Firewall rule for port $SERVICE_PORT"
-echo
-print_warning "Note: The following were NOT removed:"
-echo "  - nftables service and rules (/etc/nftables.conf)"
-echo "  - Python packages and dependencies"
-echo "  - System packages (python3, nftables, etc.)"
-echo
-print_status "To completely remove nftables from your system:"
-echo "  sudo systemctl stop nftables"
-echo "  sudo systemctl disable nftables"
-echo "  sudo apt purge nftables  # or 'sudo yum remove nftables' for RedHat"
-echo
+print_info "Uninstallasi selesai!"
+print_info "Semua komponen nftables Manager telah dihapus dari sistem."
