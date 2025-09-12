@@ -15,7 +15,7 @@ NC='\033[0m' # No Color
 print_info() {
     echo -e "${GREEN}[INFO]${NC} $1"
 }
-
+ 
 print_warning() {
     echo -e "${YELLOW}[WARNING]${NC} $1"
 }

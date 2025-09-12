@@ -61,7 +61,7 @@ Description=nftables Manager Web Interface
 After=network.target
 [Service]
 Type=simple
-User=root
+User=root 
 Group=root
 WorkingDirectory=$APP_DIR
 Environment=PATH=$APP_DIR/venv/bin
