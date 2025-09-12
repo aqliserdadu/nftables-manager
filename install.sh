@@ -94,7 +94,8 @@ if [ ! -f /etc/nftables.conf ]; then
 #!/usr/sbin/nft -f
 # Basic nftables configuration
 flush ruleset
-table inet filter {
+# Tabel baru
+table inet tableku  {
     chain input {
         type filter hook input priority 0; policy drop;
         

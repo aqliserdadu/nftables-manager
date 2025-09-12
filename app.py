@@ -730,53 +730,67 @@ def toggle_rule_in_db(rule_id):
     conn.commit()
     conn.close()
 
-# Fungsi nftables
+# Fungsi nftablesdef save_rules():
 def save_rules():
     """Simpan aturan ke file dan reload nftables"""
     try:
         logging.info("=== Starting save_rules process ===")
-        
         if not ensure_directory_exists(RULES_FILE):
             logging.error("Failed to create configuration directory")
             return False, "Failed to create configuration directory"
-        
         rules = get_rules()
         logging.info(f"Found {len(rules)} rules in database")
         
+        # Pertama cek apakah tabel sudah ada
+        try:
+            result = subprocess.run(['/usr/sbin/nft', 'list', 'tables'], 
+                                  capture_output=True, text=True)
+            table_exists = 'inet tableku' in result.stdout
+            logging.info(f"Table 'tableku' exists: {table_exists}")
+        except Exception as e:
+            logging.error(f"Error checking table existence: {e}")
+            table_exists = False
+        
         config = """#!/usr/sbin/nft -f
-# Hapus semua aturan yang ada
-flush ruleset
-# Tabel baru
-table inet filter {
-    chain input {
-        type filter hook input priority 0; policy drop;
-        
-        # Allow loopback
-        iifname lo accept
-        
-        # Allow established connections
-        ct state established,related accept
-        
 """
         
+        # Hanya hapus tabel jika sudah ada
+        if table_exists:
+            config += """# Hapus tabel yang sudah ada
+flush ruleset
+"""
+        
+        config += """# Tabel baru
+table inet tableku {
+    chain input {
+        type filter hook input priority 0; policy drop;
+        # Allow loopback
+        iifname lo accept
+        # Allow established connections
+        ct state established,related accept
+"""
+        # buffer aturan tiap chain
+        chain_rules = {
+            "input": "",
+            "forward": "",
+            "output": "",
+        }
         enabled_rules = 0
         for rule in rules:
             if not rule['enabled']:
                 continue
-                
             enabled_rules += 1
             rule_str = "        "
-            
+            # Tambahkan komentar nama rule
             if rule['name']:
                 group_name = rule['group_name'] if rule['group_name'] else "Ungrouped"
                 rule_str += f"# {rule['name']} [{group_name}]\n        "
-            
+            # Sumber / tujuan
             if rule['src']:
                 rule_str += f"ip saddr {rule['src']} "
-            
             if rule['dst']:
                 rule_str += f"ip daddr {rule['dst']} "
-            
+            # Protokol & port
             if rule['protocol'] and rule['protocol'].lower() == 'icmp':
                 rule_str += "icmp type echo-request accept"
             elif rule['dport']:
@@ -784,49 +798,52 @@ table inet filter {
                 rule_str += f"{protocol} dport {rule['dport']} "
             elif rule['protocol']:
                 rule_str += f"{rule['protocol']} "
-            
+            # Aksi (kecuali ICMP echo-request sudah fixed)
             if not (rule['protocol'] and rule['protocol'].lower() == 'icmp'):
                 rule_str += rule['action']
-            
+            # Komentar tambahan
             if rule['comment']:
                 rule_str += f" # {rule['comment']}"
-            
             rule_str += "\n"
-            config += rule_str
-        
-        logging.info(f"Generated config with {enabled_rules} enabled rules")
-        
+            # Masukkan rule ke chain sesuai rule['chain']
+            chain_name = rule['chain'].lower()
+            if chain_name in chain_rules:
+                chain_rules[chain_name] += rule_str
+            else:
+                logging.warning(f"Unknown chain: {rule['chain']}")
+        # susun ulang config
+        config += chain_rules["input"]
         config += """    }
-    
     chain forward {
         type filter hook forward priority 0; policy drop;
-    }
-    
+"""
+        config += chain_rules["forward"]
+        config += """    }
     chain output {
         type filter hook output priority 0; policy accept;
-    }
+"""
+        config += chain_rules["output"]
+        config += """    }
 }
 """
-        
+        logging.info(f"Generated config with {enabled_rules} enabled rules")
+        # Simpan ke file & reload nft
         try:
             with open(RULES_FILE, "w") as f:
                 f.write(config)
             os.chmod(RULES_FILE, 0o640)
             logging.info(f"Rules saved to {RULES_FILE}")
-            
             success, message = reload_nft()
             if not success:
                 return False, message
-            
             return True, "Rules saved successfully"
         except Exception as e:
             logging.error(f"Error saving rules: {e}")
-            return False, f"Error saving rules: {e}"
-            
     except Exception as e:
         logging.error(f"Unexpected error in save_rules: {e}")
         return False, f"Unexpected error: {e}"
 
+        
 def reload_nft():
     """Reload konfigurasi nftables"""
     try:
