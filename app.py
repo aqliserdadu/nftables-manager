@@ -7,57 +7,132 @@ from werkzeug.security import generate_password_hash, check_password_hash
 from datetime import datetime, timedelta
 import logging
 import secrets
+import threading
+import time
+
 # Konfigurasi logging
 logging.basicConfig(
     filename='/var/log/nftables_manager.log',
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s'
 )
-# Tambahkan console handler untuk debugging
 console = logging.StreamHandler()
 console.setLevel(logging.INFO)
 formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s')
 console.setFormatter(formatter)
 logging.getLogger('').addHandler(console)
+
 app = Flask(__name__)
-# Generate random secret key for security
 app.secret_key = secrets.token_hex(32)
+
 # Konfigurasi Database
 DB_FILE = "/var/lib/nftables_manager/firewall.db"
 RULES_FILE = "/etc/nftables.d/custom.nft"
 NFT_CONF = "/etc/nftables.conf"
 BACKUP_DIR = "/etc/nftables.d/backups"
+
+def adapt_datetime(ts):
+    """Adapter untuk datetime ke SQLite"""
+    return ts.isoformat()
+
+def convert_datetime(ts):
+    """Converter dari SQLite ke datetime"""
+    try:
+        return datetime.fromisoformat(ts.decode())
+    except:
+        try:
+            # Coba format dengan 'T' (ISO 8601)
+            return datetime.strptime(ts.decode(), "%Y-%m-%dT%H:%M:%S")
+        except:
+            # Coba format dengan spasi
+            return datetime.strptime(ts.decode(), "%Y-%m-%d %H:%M:%S")
+
+# Register adapters dan converters
+sqlite3.register_adapter(datetime, adapt_datetime)
+sqlite3.register_converter("timestamp", convert_datetime)
+sqlite3.register_converter("TIMESTAMP", convert_datetime)
+
+# Fungsi untuk menonaktifkan aturan yang sudah expired
+def check_expired_rules():
+    """Memeriksa dan menonaktifkan aturan yang sudah melewati waktu expired"""
+    try:
+        conn = sqlite3.connect(DB_FILE)
+        c = conn.cursor()
+        
+        # Dapatkan waktu saat ini
+        current_time = datetime.now()
+        
+        # Cari aturan yang sudah expired tapi masih aktif
+        c.execute("""
+            SELECT id, name FROM rules 
+            WHERE expired_at IS NOT NULL 
+            AND datetime(expired_at) <= datetime(?) 
+            AND enabled = 1
+        """, (current_time.isoformat(),))
+        
+        expired_rules = c.fetchall()
+        
+        if expired_rules:
+            logging.info(f"Found {len(expired_rules)} expired rules to disable")
+            
+            # Nonaktifkan aturan yang sudah expired
+            for rule in expired_rules:
+                c.execute("""
+                    UPDATE rules SET enabled = 0, updated_at = CURRENT_TIMESTAMP 
+                    WHERE id = ?
+                """, (rule[0],))
+                logging.info(f"Disabled expired rule: {rule[1]} (ID: {rule[0]})")
+            
+            conn.commit()
+            
+            # Simpan perubahan ke file konfigurasi
+            save_rules()
+            
+        conn.close()
+        
+    except Exception as e:
+        logging.error(f"Error checking expired rules: {e}")
+
+# Fungsi untuk menjalankan pengecekan aturan expired secara berkala
+def expired_rules_checker():
+    """Menjalankan pengecekan aturan expired setiap jam"""
+    while True:
+        try:
+            check_expired_rules()
+            time.sleep(3600)  # 1 jam sebelum pengecekan lanjut kembali
+        except Exception as e:
+            logging.error(f"Error in expired rules checker: {e}")
+            time.sleep(300)
+
 # Fungsi untuk membuat direktori jika belum ada
 def ensure_directory_exists(path):
     directory = os.path.dirname(path)
     if not os.path.exists(directory):
         try:
-            os.makedirs(directory, mode=0o750)  # More restrictive permissions
+            os.makedirs(directory, mode=0o750)
             logging.info(f"Created directory: {directory}")
             return True
         except Exception as e:
             logging.error(f"Error creating directory {directory}: {e}")
             return False
     return True
+
 # Fungsi backup konfigurasi dan database
 def backup_config():
     """Backup konfigurasi nftables dan database"""
     try:
         logging.info("=== Starting backup process ===")
         
-        # Pastikan direktori backup ada
         if not ensure_directory_exists(BACKUP_DIR):
             logging.error(f"Failed to create backup directory: {BACKUP_DIR}")
             return False, "Failed to create backup directory"
         
         logging.info(f"Backup directory exists: {BACKUP_DIR}")
         
-        # Cek izin tulis ke direktori backup
         if not os.access(BACKUP_DIR, os.W_OK):
             logging.error(f"No write permission for backup directory: {BACKUP_DIR}")
             return False, f"No write permission for backup directory"
         
-        # Buat direktori backup dengan timestamp
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_subdir = os.path.join(BACKUP_DIR, f"backup_{timestamp}")
         
@@ -73,14 +148,13 @@ def backup_config():
             nft_backup_file = os.path.join(backup_subdir, "nftables.conf")
             try:
                 shutil.copy2(NFT_CONF, nft_backup_file)
-                os.chmod(nft_backup_file, 0o640)  # Secure permissions
+                os.chmod(nft_backup_file, 0o640)
                 logging.info(f"Backed up nftables config to {nft_backup_file}")
             except Exception as e:
                 logging.error(f"Error backing up nftables config: {e}")
                 return False, f"Error backing up nftables config: {e}"
         else:
             logging.warning(f"nftables config file {NFT_CONF} does not exist")
-            # Buat file dummy jika tidak ada
             nft_backup_file = os.path.join(backup_subdir, "nftables.conf")
             try:
                 with open(nft_backup_file, 'w') as f:
@@ -95,17 +169,15 @@ def backup_config():
             db_backup_file = os.path.join(backup_subdir, "firewall.db")
             try:
                 shutil.copy2(DB_FILE, db_backup_file)
-                os.chmod(db_backup_file, 0o640)  # Secure permissions
+                os.chmod(db_backup_file, 0o640)
                 logging.info(f"Backed up database to {db_backup_file}")
             except Exception as e:
                 logging.error(f"Error backing up database: {e}")
                 return False, f"Error backing up database: {e}"
         else:
             logging.warning(f"Database file {DB_FILE} does not exist")
-            # Buat file dummy jika tidak ada
             db_backup_file = os.path.join(backup_subdir, "firewall.db")
             try:
-                # Buat database kosong
                 conn = sqlite3.connect(db_backup_file)
                 conn.close()
                 os.chmod(db_backup_file, 0o640)
@@ -141,6 +213,7 @@ def backup_config():
     except Exception as e:
         logging.error(f"Unexpected error in backup_config: {e}")
         return False, f"Unexpected error: {e}"
+
 # Fungsi untuk mendapatkan daftar backup
 def get_backup_list():
     """Mendapatkan daftar backup yang tersedia"""
@@ -151,21 +224,17 @@ def get_backup_list():
         if os.path.exists(BACKUP_DIR):
             logging.info("Backup directory exists")
             
-            # Cari subdirektori backup
             for item in os.listdir(BACKUP_DIR):
                 item_path = os.path.join(BACKUP_DIR, item)
                 if os.path.isdir(item_path) and item.startswith("backup_"):
                     try:
-                        # Dapatkan informasi backup
                         info_file = os.path.join(item_path, "backup_info.txt")
                         backup_time = datetime.fromtimestamp(os.path.getctime(item_path))
                         
-                        # Cek file yang ada di backup
                         has_nftables = os.path.exists(os.path.join(item_path, "nftables.conf"))
                         has_db = os.path.exists(os.path.join(item_path, "firewall.db"))
                         has_info = os.path.exists(os.path.join(item_path, "backup_info.txt"))
                         
-                        # Hitung total size
                         total_size = 0
                         for root, dirs, files in os.walk(item_path):
                             for file in files:
@@ -188,7 +257,6 @@ def get_backup_list():
                     except Exception as e:
                         logging.error(f"Error processing backup {item}: {e}")
             
-            # Urutkan berdasarkan waktu pembuatan (terbaru dulu)
             backups.sort(key=lambda x: x['created'], reverse=True)
             logging.info(f"Total backups found: {len(backups)}")
         else:
@@ -198,23 +266,21 @@ def get_backup_list():
         logging.error(f"Error getting backup list: {e}")
     
     return backups
+
 # Fungsi untuk menghapus backup
 def delete_backup(backup_path):
     """Hapus direktori backup"""
     try:
         logging.info(f"=== Starting delete backup: {backup_path} ===")
         
-        # Verifikasi direktori backup ada
         if not os.path.exists(backup_path):
             logging.error(f"Backup directory not found: {backup_path}")
             return False, "Backup directory not found"
         
-        # Verifikasi bahwa ini adalah direktori backup
         if not os.path.basename(backup_path).startswith("backup_"):
             logging.error(f"Invalid backup directory: {backup_path}")
             return False, "Invalid backup directory"
         
-        # Hapus direktori backup dan semua isinya
         try:
             shutil.rmtree(backup_path)
             logging.info(f"Successfully deleted backup: {backup_path}")
@@ -226,18 +292,17 @@ def delete_backup(backup_path):
     except Exception as e:
         logging.error(f"Unexpected error in delete_backup: {e}")
         return False, f"Unexpected error: {e}"
+
 # Fungsi restore dari backup
 def restore_from_backup(backup_path):
     """Restore konfigurasi dan database dari backup"""
     try:
         logging.info(f"=== Starting restore from: {backup_path} ===")
         
-        # Backup konfigurasi saat ini sebelum restore
         backup_success, backup_message = backup_config()
         if not backup_success:
             logging.warning(f"Backup before restore failed: {backup_message}")
         
-        # Verifikasi direktori backup ada
         if not os.path.exists(backup_path):
             logging.error(f"Backup directory not found: {backup_path}")
             return False, "Backup directory not found"
@@ -246,7 +311,6 @@ def restore_from_backup(backup_path):
         db_backup_file = os.path.join(backup_path, "firewall.db")
         if os.path.exists(db_backup_file):
             try:
-                # Backup database saat ini
                 if os.path.exists(DB_FILE):
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                     pre_restore_db_backup = f"{DB_FILE}.prerestore_{timestamp}"
@@ -254,7 +318,6 @@ def restore_from_backup(backup_path):
                     os.chmod(pre_restore_db_backup, 0o640)
                     logging.info(f"Pre-restore database backup: {pre_restore_db_backup}")
                 
-                # Restore database
                 shutil.copy2(db_backup_file, DB_FILE)
                 os.chmod(DB_FILE, 0o640)
                 logging.info(f"Restored database from {db_backup_file}")
@@ -291,11 +354,11 @@ def restore_from_backup(backup_path):
     except Exception as e:
         logging.error(f"Error restoring from backup: {e}")
         return False, f"Error restoring from backup: {e}"
+
 # Fungsi untuk mengecek status nftables
 def check_nftables_status():
     """Mengecek status service nftables"""
     try:
-        # Cek apakah service nftables ada
         check_service = subprocess.run(['/usr/bin/systemctl', 'is-enabled', 'nftables'], 
                                      capture_output=True, text=True)
         
@@ -307,19 +370,16 @@ def check_nftables_status():
                 'message': 'nftables service is not installed'
             }
         
-        # Cek status service
         status_result = subprocess.run(['/usr/bin/systemctl', 'is-active', 'nftables'], 
                                     capture_output=True, text=True)
         
         is_active = status_result.returncode == 0
         
-        # Cek apakah service enabled
         enabled_result = subprocess.run(['/usr/bin/systemctl', 'is-enabled', 'nftables'], 
                                       capture_output=True, text=True)
         
         is_enabled = enabled_result.returncode == 0
         
-        # Dapatkan detail status
         status_detail = subprocess.run(['/usr/bin/systemctl', 'status', 'nftables'], 
                                     capture_output=True, text=True)
         
@@ -337,13 +397,13 @@ def check_nftables_status():
             'active': False,
             'message': str(e)
         }
+
 # Fungsi untuk mengubah password user
 def change_password(user_id, current_password, new_password):
     """Mengubah password user"""
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     
-    # Dapatkan password hash saat ini
     c.execute("SELECT password FROM users WHERE id=?", (user_id,))
     result = c.fetchone()
     
@@ -353,15 +413,12 @@ def change_password(user_id, current_password, new_password):
     
     current_hash = result[0]
     
-    # Verifikasi password saat ini
     if not check_password_hash(current_hash, current_password):
         conn.close()
         return False, "Current password is incorrect"
     
-    # Hash password baru
     new_hash = generate_password_hash(new_password)
     
-    # Update password
     try:
         c.execute("UPDATE users SET password=? WHERE id=?", (new_hash, user_id))
         conn.commit()
@@ -372,6 +429,7 @@ def change_password(user_id, current_password, new_password):
         conn.close()
         logging.error(f"Error changing password: {e}")
         return False, f"Error changing password: {e}"
+
 # Inisialisasi Database
 def init_db():
     conn = sqlite3.connect(DB_FILE)
@@ -397,7 +455,7 @@ def init_db():
         )
     """)
     
-    # Tabel untuk aturan firewall dengan penamaan dan pengelompokan
+    # Tabel untuk aturan firewall
     c.execute("""
         CREATE TABLE IF NOT EXISTS rules (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -411,11 +469,21 @@ def init_db():
             action TEXT NOT NULL,
             comment TEXT,
             enabled BOOLEAN DEFAULT 1,
+            expired_at TIMESTAMP,
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (group_id) REFERENCES rule_groups(id)
         )
     """)
+    
+    # Cek apakah kolom expired_at sudah ada
+    c.execute("PRAGMA table_info(rules)")
+    columns = [column[1] for column in c.fetchall()]
+    
+    if 'expired_at' not in columns:
+        logging.info("Adding expired_at column to rules table")
+        c.execute("ALTER TABLE rules ADD COLUMN expired_at TIMESTAMP")
+        conn.commit()
     
     # Buat user default jika belum ada
     c.execute("SELECT * FROM users WHERE username = 'admin'")
@@ -438,7 +506,7 @@ def init_db():
             c.execute("INSERT INTO rule_groups (name, description, color) VALUES (?, ?, ?)",
                      (name, desc, color))
     
-    # Tambahkan aturan default untuk port 22 (SSH) jika belum ada
+    # Tambahkan aturan default untuk port 22 (SSH)
     c.execute("""
         SELECT COUNT(*) FROM rules 
         WHERE name = 'Allow SSH' AND dport = '22'
@@ -446,30 +514,20 @@ def init_db():
     ssh_rule_count = c.fetchone()[0]
     
     if ssh_rule_count == 0:
-        # Dapatkan ID grup Management
         c.execute("SELECT id FROM rule_groups WHERE name = 'Management'")
         management_group = c.fetchone()
         group_id = management_group[0] if management_group else None
         
-        # Tambahkan aturan default untuk port 22 (SSH)
         c.execute("""
-            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            'Allow SSH',             # name
-            group_id,                # group_id
-            'input',                 # chain
-            None,                    # src (semua sumber)
-            None,                    # dst (semua tujuan)
-            '22',                    # dport
-            'tcp',                   # protocol
-            'accept',                # action
-            'Allow SSH access for remote administration',  # comment
-            True                     # enabled
+            'Allow SSH', group_id, 'input', None, None, '22', 'tcp', 'accept', 
+            'Allow SSH access for remote administration', True, None
         ))
         logging.info("Added default rule for port 22 (SSH)")
     
-    # Tambahkan aturan default untuk port 2107 jika belum ada
+    # Tambahkan aturan default untuk port 2107
     c.execute("""
         SELECT COUNT(*) FROM rules 
         WHERE name = 'Allow Web Management' AND dport = '2107'
@@ -477,30 +535,20 @@ def init_db():
     rule_count = c.fetchone()[0]
     
     if rule_count == 0:
-        # Dapatkan ID grup Services
         c.execute("SELECT id FROM rule_groups WHERE name = 'Services'")
         services_group = c.fetchone()
         group_id = services_group[0] if services_group else None
         
-        # Tambahkan aturan default untuk port 2107
         c.execute("""
-            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            'Allow Web Management',  # name
-            group_id,                # group_id
-            'input',                 # chain
-            None,                    # src (semua sumber)
-            None,                    # dst (semua tujuan)
-            '2107',                  # dport
-            'tcp',                   # protocol
-            'accept',                # action
-            'Allow access to web management interface',  # comment
-            True                     # enabled
+            'Allow Web Management', group_id, 'input', None, None, '2107', 'tcp', 'accept', 
+            'Allow access to web management interface', True, None
         ))
         logging.info("Added default rule for port 2107 (Web Management)")
     
-    # Tambahkan aturan default untuk ICMP (ping) jika belum ada
+    # Tambahkan aturan default untuk ICMP (ping)
     c.execute("""
         SELECT COUNT(*) FROM rules 
         WHERE name = 'Allow ICMP (Ping)' AND protocol = 'icmp'
@@ -508,26 +556,16 @@ def init_db():
     icmp_rule_count = c.fetchone()[0]
     
     if icmp_rule_count == 0:
-        # Dapatkan ID grup Management
         c.execute("SELECT id FROM rule_groups WHERE name = 'Management'")
         management_group = c.fetchone()
         group_id = management_group[0] if management_group else None
         
-        # Tambahkan aturan default untuk ICMP
         c.execute("""
-            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """, (
-            'Allow ICMP (Ping)',     # name
-            group_id,                # group_id
-            'input',                 # chain
-            None,                    # src (semua sumber)
-            None,                    # dst (semua tujuan)
-            None,                    # dport (tidak ada port untuk ICMP)
-            'icmp',                  # protocol
-            'accept',                # action
-            'Allow ICMP echo requests for monitoring and troubleshooting',  # comment
-            True                     # enabled
+            'Allow ICMP (Ping)', group_id, 'input', None, None, None, 'icmp', 'accept', 
+            'Allow ICMP echo requests for monitoring and troubleshooting', True, None
         ))
         logging.info("Added default rule for ICMP (Ping)")
     
@@ -539,15 +577,12 @@ def init_db():
     ensure_directory_exists(RULES_FILE)
     ensure_directory_exists(BACKUP_DIR)
     
-    # Log informasi direktori
     logging.info(f"Rules file path: {RULES_FILE}")
     logging.info(f"NFT config path: {NFT_CONF}")
     logging.info(f"Backup directory: {BACKUP_DIR}")
     
-    # Cek apakah direktori backup ada
     if os.path.exists(BACKUP_DIR):
         logging.info("Backup directory exists")
-        # List files in backup directory
         try:
             files = os.listdir(BACKUP_DIR)
             logging.info(f"Files in backup directory: {files}")
@@ -556,7 +591,6 @@ def init_db():
     else:
         logging.warning("Backup directory does not exist")
     
-    # Buat file konfigurasi nftables jika belum ada
     if not os.path.exists(NFT_CONF):
         logging.warning(f"nftables config file {NFT_CONF} does not exist, creating empty file")
         try:
@@ -566,6 +600,7 @@ def init_db():
             logging.info(f"Created empty nftables config file: {NFT_CONF}")
         except Exception as e:
             logging.error(f"Error creating empty nftables config: {e}")
+
 # Fungsi Database
 def get_groups():
     conn = sqlite3.connect(DB_FILE)
@@ -575,6 +610,7 @@ def get_groups():
     rows = c.fetchall()
     conn.close()
     return rows
+
 def get_group(group_id):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -583,10 +619,13 @@ def get_group(group_id):
     row = c.fetchone()
     conn.close()
     return row
+
 def get_rules(group_id=None):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
+    
+    current_time = datetime.now()
     
     if group_id:
         c.execute("""
@@ -606,7 +645,37 @@ def get_rules(group_id=None):
     
     rows = c.fetchall()
     conn.close()
-    return rows
+    
+    rules = [dict(row) for row in rows]
+    
+    updated_rules = []
+    for rule in rules:
+        if rule['expired_at'] and rule['enabled']:
+            try:
+                try:
+                    expired_at = datetime.fromisoformat(rule['expired_at'])
+                except ValueError:
+                    expired_at = datetime.strptime(rule['expired_at'], '%Y-%m-%d %H:%M:%S')
+                
+                if expired_at <= current_time:
+                    conn = sqlite3.connect(DB_FILE)
+                    c = conn.cursor()
+                    c.execute("""
+                        UPDATE rules SET enabled = 0, updated_at = CURRENT_TIMESTAMP 
+                        WHERE id = ?
+                    """, (rule['id'],))
+                    conn.commit()
+                    conn.close()
+                    
+                    rule['enabled'] = 0
+                    logging.info(f"Disabled expired rule: {rule['name']} (ID: {rule['id']})")
+            except (ValueError, TypeError) as e:
+                logging.error(f"Error parsing expired_at for rule {rule['name']}: {e}")
+        
+        updated_rules.append(rule)
+    
+    return updated_rules
+
 def get_rule(rule_id):
     conn = sqlite3.connect(DB_FILE)
     conn.row_factory = sqlite3.Row
@@ -619,47 +688,54 @@ def get_rule(rule_id):
     """, (rule_id,))
     row = c.fetchone()
     conn.close()
-    return row
-def add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, comment, enabled=True):
+    
+    if row:
+        return dict(row)
+    return None
+
+def add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, comment, enabled=True, expired_at=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
-        INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    """, (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled))
+        INSERT INTO rules (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    """, (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at))
     conn.commit()
     rule_id = c.lastrowid
     conn.close()
     return rule_id
-def update_rule_in_db(rule_id, name, group_id, chain, src, dst, dport, protocol, action, comment, enabled):
+
+def update_rule_in_db(rule_id, name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at=None):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("""
         UPDATE rules SET name=?, group_id=?, chain=?, src=?, dst=?, dport=?, protocol=?, 
-        action=?, comment=?, enabled=?, updated_at=CURRENT_TIMESTAMP 
+        action=?, comment=?, enabled=?, expired_at=?, updated_at=CURRENT_TIMESTAMP 
         WHERE id=?
-    """, (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, rule_id))
+    """, (name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at, rule_id))
     conn.commit()
     conn.close()
+
 def delete_rule_from_db(rule_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("DELETE FROM rules WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
+
 def toggle_rule_in_db(rule_id):
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("UPDATE rules SET enabled = NOT enabled, updated_at=CURRENT_TIMESTAMP WHERE id=?", (rule_id,))
     conn.commit()
     conn.close()
+
 # Fungsi nftables
 def save_rules():
     """Simpan aturan ke file dan reload nftables"""
     try:
         logging.info("=== Starting save_rules process ===")
         
-        # Pastikan direktori ada sebelum menyimpan file
         if not ensure_directory_exists(RULES_FILE):
             logging.error("Failed to create configuration directory")
             return False, "Failed to create configuration directory"
@@ -667,7 +743,6 @@ def save_rules():
         rules = get_rules()
         logging.info(f"Found {len(rules)} rules in database")
         
-        # Buat header konfigurasi
         config = """#!/usr/sbin/nft -f
 # Hapus semua aturan yang ada
 flush ruleset
@@ -684,46 +759,35 @@ table inet filter {
         
 """
         
-        # Tambahkan aturan dari database
         enabled_rules = 0
         for rule in rules:
-            # Lewati aturan yang dinonaktifkan
             if not rule['enabled']:
                 continue
                 
             enabled_rules += 1
             rule_str = "        "
             
-            # Tambahkan komentar dengan nama aturan dan grup
             if rule['name']:
                 group_name = rule['group_name'] if rule['group_name'] else "Ungrouped"
                 rule_str += f"# {rule['name']} [{group_name}]\n        "
             
-            # Source address
             if rule['src']:
                 rule_str += f"ip saddr {rule['src']} "
             
-            # Destination address
             if rule['dst']:
                 rule_str += f"ip daddr {rule['dst']} "
             
-            # Protocol dan Destination port - PERBAIKAN UNTUK ICMP
             if rule['protocol'] and rule['protocol'].lower() == 'icmp':
-                # Untuk ICMP, gunakan format khusus
                 rule_str += "icmp type echo-request accept"
             elif rule['dport']:
-                # Jika port diisi tetapi protocol tidak, gunakan tcp sebagai default
                 protocol = rule['protocol'] if rule['protocol'] else 'tcp'
                 rule_str += f"{protocol} dport {rule['dport']} "
             elif rule['protocol']:
-                # Jika hanya protocol yang diisi
                 rule_str += f"{rule['protocol']} "
             
-            # Jika bukan ICMP, tambahkan action
             if not (rule['protocol'] and rule['protocol'].lower() == 'icmp'):
                 rule_str += rule['action']
             
-            # Comment
             if rule['comment']:
                 rule_str += f" # {rule['comment']}"
             
@@ -732,7 +796,6 @@ table inet filter {
         
         logging.info(f"Generated config with {enabled_rules} enabled rules")
         
-        # Footer konfigurasi
         config += """    }
     
     chain forward {
@@ -745,14 +808,12 @@ table inet filter {
 }
 """
         
-        # Tulis ke file
         try:
             with open(RULES_FILE, "w") as f:
                 f.write(config)
-            os.chmod(RULES_FILE, 0o640)  # Secure permissions
+            os.chmod(RULES_FILE, 0o640)
             logging.info(f"Rules saved to {RULES_FILE}")
             
-            # Reload nftables
             success, message = reload_nft()
             if not success:
                 return False, message
@@ -765,12 +826,12 @@ table inet filter {
     except Exception as e:
         logging.error(f"Unexpected error in save_rules: {e}")
         return False, f"Unexpected error: {e}"
+
 def reload_nft():
     """Reload konfigurasi nftables"""
     try:
         logging.info("=== Starting reload_nft process ===")
         
-        # Salin konfigurasi baru
         logging.info(f"Copying {RULES_FILE} to {NFT_CONF}")
         try:
             subprocess.run(["/usr/bin/cp", RULES_FILE, NFT_CONF], check=True)
@@ -779,7 +840,6 @@ def reload_nft():
             logging.error(f"Error copying file: {e}")
             return False, f"Error copying file: {e}"
         
-        # Reload nftables
         logging.info("Restarting nftables service...")
         try:
             result = subprocess.run(["/usr/bin/systemctl", "restart", "nftables"], 
@@ -796,6 +856,7 @@ def reload_nft():
     except Exception as e:
         logging.error(f"Unexpected error in reload_nft: {e}")
         return False, f"Unexpected error: {e}"
+
 # Autentikasi
 def login_required(f):
     def decorated_function(*args, **kwargs):
@@ -805,12 +866,14 @@ def login_required(f):
         return f(*args, **kwargs)
     decorated_function.__name__ = f.__name__
     return decorated_function
+
 # Routes
 @app.route('/')
 def index():
     if 'user_id' in session:
         return redirect(url_for('dashboard'))
     return redirect(url_for('login'))
+
 @app.route('/login', methods=['GET', 'POST'])
 def login():
     if request.method == 'POST':
@@ -826,7 +889,7 @@ def login():
         if user and check_password_hash(user[2], password):
             session['user_id'] = user[0]
             session['username'] = user[1]
-            session.permanent = True  # Make session permanent
+            session.permanent = True
             flash('Login successful!', 'success')
             logging.info(f"User {username} logged in")
             return redirect(url_for('dashboard'))
@@ -835,6 +898,7 @@ def login():
             logging.warning(f"Failed login attempt for username: {username}")
     
     return render_template('login.html')
+
 @app.route('/logout')
 def logout():
     username = session.get('username', 'Unknown')
@@ -842,6 +906,7 @@ def logout():
     flash('You have been logged out', 'info')
     logging.info(f"User {username} logged out")
     return redirect(url_for('login'))
+
 @app.route('/change_password', methods=['GET', 'POST'])
 @login_required
 def change_password_route():
@@ -850,16 +915,14 @@ def change_password_route():
         new_password = request.form['new_password']
         confirm_password = request.form['confirm_password']
         
-        # Validasi password baru
         if new_password != confirm_password:
             flash('New password and confirmation do not match!', 'danger')
             return render_template('change_password.html')
         
-        if len(new_password) < 8:  # Increased minimum password length
+        if len(new_password) < 8:
             flash('Password must be at least 8 characters long!', 'danger')
             return render_template('change_password.html')
         
-        # Ubah password
         success, message = change_password(session['user_id'], current_password, new_password)
         
         if success:
@@ -869,6 +932,7 @@ def change_password_route():
             flash(message, 'danger')
     
     return render_template('change_password.html')
+
 @app.route('/dashboard')
 @login_required
 def dashboard():
@@ -880,7 +944,9 @@ def dashboard():
     return render_template('dashboard.html', 
                           rules=rules, 
                           groups=groups, 
-                          selected_group=selected_group)
+                          selected_group=selected_group,
+                          datetime=datetime)
+
 @app.route('/add_rule', methods=['GET', 'POST'])
 @login_required
 def add_rule_route():
@@ -898,18 +964,29 @@ def add_rule_route():
         comment = request.form['comment']
         enabled = 'enabled' in request.form
         
-        # Validasi: jika dport diisi, protocol juga harus diisi
+        expired_at = None
+        has_expiry = 'has_expiry' in request.form
+        if has_expiry:
+            if 'expired_date' in request.form and request.form['expired_date']:
+                expired_date = request.form['expired_date']
+                expired_time = request.form.get('expired_time', '00:00')
+                expired_at_str = f"{expired_date} {expired_time}"
+                try:
+                    expired_at = datetime.strptime(expired_at_str, '%Y-%m-%d %H:%M')
+                except ValueError:
+                    flash('Invalid expiration date/time format!', 'danger')
+                    return render_template('add_rule.html', groups=groups, 
+                                          form_data=request.form, datetime=datetime)
+        
         if dport and not protocol:
             flash('Protocol is required when specifying a port!', 'danger')
             return render_template('add_rule.html', groups=groups, 
-                                  form_data=request.form)
+                                  form_data=request.form, datetime=datetime)
         
         try:
-            # Tambah aturan ke database
-            rule_id = add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
+            rule_id = add_rule_to_db(name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at)
             logging.info(f"Added rule {name} (ID: {rule_id}) to database")
             
-            # Simpan ke file konfigurasi
             success, message = save_rules()
             
             if success:
@@ -922,7 +999,8 @@ def add_rule_route():
             logging.error(f"Error adding rule: {e}")
             flash(f'Error adding rule: {e}', 'danger')
     
-    return render_template('add_rule.html', groups=groups)
+    return render_template('add_rule.html', groups=groups, datetime=datetime)
+
 @app.route('/edit/<int:rule_id>', methods=['GET', 'POST'])
 @login_required
 def edit_rule(rule_id):
@@ -931,6 +1009,7 @@ def edit_rule(rule_id):
         flash('Rule not found', 'danger')
         return redirect(url_for('dashboard'))
     
+    rule_dict = dict(rule)
     groups = get_groups()
     
     if request.method == 'POST':
@@ -945,18 +1024,29 @@ def edit_rule(rule_id):
         comment = request.form['comment']
         enabled = 'enabled' in request.form
         
-        # Validasi: jika dport diisi, protocol juga harus diisi
+        expired_at = None
+        has_expiry = 'has_expiry' in request.form
+        if has_expiry:
+            if 'expired_date' in request.form and request.form['expired_date']:
+                expired_date = request.form['expired_date']
+                expired_time = request.form.get('expired_time', '00:00')
+                expired_at_str = f"{expired_date} {expired_time}"
+                try:
+                    expired_at = datetime.strptime(expired_at_str, '%Y-%m-%d %H:%M')
+                except ValueError:
+                    flash('Invalid expiration date/time format!', 'danger')
+                    return render_template('edit_rule.html', rule=rule_dict, groups=groups, 
+                                          form_data=request.form, datetime=datetime)
+        
         if dport and not protocol:
             flash('Protocol is required when specifying a port!', 'danger')
-            return render_template('edit_rule.html', rule=rule, groups=groups, 
-                                  form_data=request.form)
+            return render_template('edit_rule.html', rule=rule_dict, groups=groups, 
+                                  form_data=request.form, datetime=datetime)
         
         try:
-            # Update aturan di database
-            update_rule_in_db(rule_id, name, group_id, chain, src, dst, dport, protocol, action, comment, enabled)
+            update_rule_in_db(rule_id, name, group_id, chain, src, dst, dport, protocol, action, comment, enabled, expired_at)
             logging.info(f"Updated rule {name} (ID: {rule_id}) in database")
             
-            # Simpan ke file konfigurasi
             success, message = save_rules()
             
             if success:
@@ -969,16 +1059,32 @@ def edit_rule(rule_id):
             logging.error(f"Error updating rule: {e}")
             flash(f'Error updating rule: {e}', 'danger')
     
-    return render_template('edit_rule.html', rule=rule, groups=groups)
+    if rule_dict['expired_at']:
+        try:
+            try:
+                expired_datetime = datetime.fromisoformat(rule_dict['expired_at'])
+            except ValueError:
+                expired_datetime = datetime.strptime(rule_dict['expired_at'], '%Y-%m-%d %H:%M:%S')
+            
+            rule_dict['expired_date'] = expired_datetime.strftime('%Y-%m-%d')
+            rule_dict['expired_time'] = expired_datetime.strftime('%H:%M')
+        except (ValueError, TypeError) as e:
+            logging.error(f"Error parsing expired_at for rule {rule_dict['name']}: {e}")
+            rule_dict['expired_date'] = ''
+            rule_dict['expired_time'] = '00:00'
+    else:
+        rule_dict['expired_date'] = ''
+        rule_dict['expired_time'] = '00:00'
+    
+    return render_template('edit_rule.html', rule=rule_dict, groups=groups, datetime=datetime)
+
 @app.route('/delete/<int:rule_id>')
 @login_required
 def delete_rule_route(rule_id):
     try:
-        # Hapus aturan dari database
         delete_rule_from_db(rule_id)
         logging.info(f"Deleted rule ID: {rule_id} from database")
         
-        # Simpan ke file konfigurasi
         success, message = save_rules()
         
         if success:
@@ -990,15 +1096,14 @@ def delete_rule_route(rule_id):
         flash(f'Error deleting rule: {e}', 'danger')
     
     return redirect(url_for('dashboard'))
+
 @app.route('/toggle/<int:rule_id>')
 @login_required
 def toggle_rule_route(rule_id):
     try:
-        # Toggle aturan di database
         toggle_rule_in_db(rule_id)
         logging.info(f"Toggled rule ID: {rule_id} in database")
         
-        # Simpan ke file konfigurasi
         success, message = save_rules()
         
         if success:
@@ -1010,11 +1115,13 @@ def toggle_rule_route(rule_id):
         flash(f'Error toggling rule: {e}', 'danger')
     
     return redirect(url_for('dashboard'))
+
 @app.route('/groups')
 @login_required
 def manage_groups():
     groups = get_groups()
     return render_template('groups.html', groups=groups)
+
 @app.route('/add_group', methods=['GET', 'POST'])
 @login_required
 def add_group():
@@ -1038,6 +1145,7 @@ def add_group():
             conn.close()
     
     return render_template('add_group.html')
+
 @app.route('/edit_group/<int:group_id>', methods=['GET', 'POST'])
 @login_required
 def edit_group(group_id):
@@ -1068,10 +1176,10 @@ def edit_group(group_id):
             conn.close()
     
     return render_template('edit_group.html', group=group)
+
 @app.route('/delete_group/<int:group_id>')
 @login_required
 def delete_group(group_id):
-    # Cek apakah grup memiliki aturan
     conn = sqlite3.connect(DB_FILE)
     c = conn.cursor()
     c.execute("SELECT COUNT(*) FROM rules WHERE group_id=?", (group_id,))
@@ -1090,6 +1198,7 @@ def delete_group(group_id):
         logging.info(f"Deleted group ID: {group_id}")
     
     return redirect(url_for('manage_groups'))
+
 @app.route('/status')
 @login_required
 def status():
@@ -1108,15 +1217,16 @@ def config():
                           rules_file=RULES_FILE, 
                           nft_conf=NFT_CONF,
                           backup_dir=BACKUP_DIR)
+
 @app.route('/backups')
 @login_required
 def backups():
     backup_list = get_backup_list()
     return render_template('backups.html', backups=backup_list, backup_dir=BACKUP_DIR)
+
 @app.route('/restore/<path:backup_name>')
 @login_required
 def restore_backup(backup_name):
-    # Decode path untuk menghandle karakter khusus
     backup_path = os.path.join(BACKUP_DIR, backup_name)
     
     if not os.path.exists(backup_path):
@@ -1131,11 +1241,10 @@ def restore_backup(backup_name):
         flash(message, 'danger')
     
     return redirect(url_for('backups'))
+
 @app.route('/delete_backup/<path:backup_name>')
 @login_required
 def delete_backup_route(backup_name):
-    """Route untuk menghapus backup"""
-    # Decode path untuk menghandle karakter khusus
     backup_path = os.path.join(BACKUP_DIR, backup_name)
     
     if not os.path.exists(backup_path):
@@ -1149,6 +1258,7 @@ def delete_backup_route(backup_name):
         flash(message, 'danger')
     
     return redirect(url_for('backups'))
+
 @app.route('/apply_rules', methods=['POST'])
 @login_required
 def apply_rules():
@@ -1158,10 +1268,10 @@ def apply_rules():
     else:
         flash(f'Failed to apply rules: {message}', 'danger')
     return redirect(url_for('dashboard'))
+
 @app.route('/debug/backup')
 @login_required
 def debug_backup():
-    """Debug endpoint untuk memeriksa backup"""
     debug_info = {
         'backup_dir_exists': os.path.exists(BACKUP_DIR),
         'backup_dir_path': BACKUP_DIR,
@@ -1178,7 +1288,6 @@ def debug_backup():
         'test_backup_message': None
     }
     
-    # Cek permissions
     if os.path.exists(BACKUP_DIR):
         try:
             debug_info['backup_dir_permissions'] = oct(os.stat(BACKUP_DIR).st_mode)[-3:]
@@ -1197,7 +1306,6 @@ def debug_backup():
         except:
             pass
     
-    # List backup directories
     if os.path.exists(BACKUP_DIR):
         try:
             items = os.listdir(BACKUP_DIR)
@@ -1214,31 +1322,20 @@ def debug_backup():
         except Exception as e:
             debug_info['error'] = str(e)
     
-    # # Test backup
-    # try:
-    #     backup_success, backup_message = backup_config()
-    #     debug_info['test_backup_success'] = backup_success
-    #     debug_info['test_backup_message'] = backup_message
-    #     logging.info(f"Test backup result: {backup_success}, {backup_message}")
-    # except Exception as e:
-    #     debug_info['test_backup_success'] = False
-    #     debug_info['test_backup_message'] = str(e)
-    #     logging.error(f"Error in test backup: {e}")
-    
     return render_template('debug_backup.html', debug_info=debug_info)
+
 @app.route('/api/create-backup', methods=['POST'])
 @login_required
 def api_create_backup():
-    """API endpoint untuk membuat backup manual"""
     success, message = backup_config()
     return jsonify({
         'success': success,
         'message': message
     })
+
 @app.route('/api/delete-old-backups', methods=['POST'])
 @login_required
 def api_delete_old_backups():
-    """API endpoint untuk menghapus backup yang lebih lama dari 30 hari"""
     try:
         cutoff_date = datetime.now() - timedelta(days=30)
         deleted_count = 0
@@ -1248,10 +1345,8 @@ def api_delete_old_backups():
                 item_path = os.path.join(BACKUP_DIR, item)
                 if os.path.isdir(item_path) and item.startswith("backup_"):
                     try:
-                        # Dapatkan waktu pembuatan backup
                         create_time = datetime.fromtimestamp(os.path.getctime(item_path))
                         
-                        # Hapus jika lebih lama dari 30 hari
                         if create_time < cutoff_date:
                             shutil.rmtree(item_path)
                             deleted_count += 1
@@ -1270,22 +1365,41 @@ def api_delete_old_backups():
             'success': False,
             'message': str(e)
         })
-# API Routes
+
+@app.route('/api/check-expired-rules', methods=['POST'])
+@login_required
+def api_check_expired_rules():
+    try:
+        check_expired_rules()
+        return jsonify({
+            'success': True,
+            'message': 'Expired rules check completed'
+        })
+    except Exception as e:
+        logging.error(f"Error in check_expired_rules: {e}")
+        return jsonify({
+            'success': False,
+            'message': str(e)
+        })
+
 @app.route('/api/nftables-status')
 @login_required
 def api_nftables_status():
-    """API endpoint untuk mengecek status nftables"""
     status = check_nftables_status()
     return jsonify(status)
+
 if __name__ == "__main__":
     logging.info("=== Starting nftables Manager application ===")
     init_db()
     
-    # Pastikan aturan default sudah diaplikasikan
     success, message = save_rules()
     if success:
         logging.info("Default rules applied successfully")
     else:
         logging.error(f"Failed to apply default rules: {message}")
+    
+    checker_thread = threading.Thread(target=expired_rules_checker, daemon=True)
+    checker_thread.start()
+    logging.info("Started expired rules checker thread")
     
     app.run(host="0.0.0.0", port=2107, debug=False)

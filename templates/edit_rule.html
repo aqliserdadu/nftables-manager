@@ -1,29 +1,29 @@
 {% extends "base.html" %}
-
 {% block title %}Edit Rule{% endblock %}
-
 {% block content %}
 <div class="row justify-content-center">
     <div class="col-md-10 col-lg-8">
         <div class="card shadow">
             <div class="card-body">
                 <h3 class="card-title mb-4">
-                    <i class="bi bi-pencil"></i> Edit Firewall Rule
+                    <i class="bi bi-pencil-square"></i> Edit Firewall Rule
                 </h3>
                 <form method="POST">
                     <div class="row mb-3">
                         <div class="col-md-6">
                             <label for="name" class="form-label">Rule Name *</label>
                             <input type="text" class="form-control" id="name" name="name" value="{{ rule.name }}" required>
+                            <div class="form-text">Give your rule a descriptive name for easier troubleshooting</div>
                         </div>
                         <div class="col-md-6">
                             <label for="group_id" class="form-label">Group</label>
                             <select class="form-select" id="group_id" name="group_id">
                                 <option value="">-- No Group --</option>
                                 {% for group in groups %}
-                                <option value="{{ group.id }}" {% if rule.group_id == group.id %}selected{% endif %}>{{ group.name }}</option>
+                                <option value="{{ group.id }}" {% if group.id == rule.group_id %}selected{% endif %}>{{ group.name }}</option>
                                 {% endfor %}
                             </select>
+                            <div class="form-text">Group rules for better organization</div>
                         </div>
                     </div>
                     
@@ -61,7 +61,7 @@
                         <div class="col-md-6">
                             <label for="protocol" class="form-label">Protocol</label>
                             <select class="form-select" id="protocol" name="protocol">
-                                <option value="">Any</option>
+                                <option value="" {% if not rule.protocol %}selected{% endif %}>Any</option>
                                 <option value="tcp" {% if rule.protocol == 'tcp' %}selected{% endif %}>TCP</option>
                                 <option value="udp" {% if rule.protocol == 'udp' %}selected{% endif %}>UDP</option>
                                 <option value="icmp" {% if rule.protocol == 'icmp' %}selected{% endif %}>ICMP</option>
@@ -76,6 +76,46 @@
                     <div class="mb-3">
                         <label for="comment" class="form-label">Comment</label>
                         <textarea class="form-control" id="comment" name="comment" rows="2">{{ rule.comment or '' }}</textarea>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="has_expiry" name="has_expiry" {% if rule.expired_at %}checked{% endif %}>
+                            <label class="form-check-label" for="has_expiry">
+                                Set Expiry Date & Time
+                            </label>
+                        </div>
+                        <div id="expiry_fields" {% if not rule.expired_at %}style="display: none;"{% endif %}>
+                            <div class="row mt-2">
+                                <div class="col-md-6">
+                                    <label for="expired_date" class="form-label">Expiry Date</label>
+                                    <input type="date" class="form-control" name="expired_date" id="expired_date" 
+                                           value="{{ rule.expired_date }}" min="{{ datetime.now().strftime('%Y-%m-%d') }}">
+                                </div>
+                                <div class="col-md-6">
+                                    <label for="expired_time" class="form-label">Expiry Time</label>
+                                    <input type="time" class="form-control" name="expired_time" id="expired_time" 
+                                           value="{{ rule.expired_time }}">
+                                </div>
+                            </div>
+                            <small class="form-text text-muted">Rule will be automatically disabled when expired</small>
+                        </div>
+                        
+                        {% if rule.expired_at %}
+                        <div class="mt-2">
+                            {% if rule.enabled %}
+                            <div class="alert alert-warning">
+                                <i class="bi bi-exclamation-triangle"></i> 
+                                This rule will expire on {{ rule.expired_at }}
+                            </div>
+                            {% else %}
+                            <div class="alert alert-info">
+                                <i class="bi bi-info-circle"></i> 
+                                This rule expired on {{ rule.expired_at }} and has been disabled
+                            </div>
+                            {% endif %}
+                        </div>
+                        {% endif %}
                     </div>
                     
                     <div class="mb-4 form-check">
@@ -96,4 +136,52 @@
         </div>
     </div>
 </div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const hasExpiryCheckbox = document.getElementById('has_expiry');
+    const expiryFields = document.getElementById('expiry_fields');
+    const expiredDateInput = document.getElementById('expired_date');
+    const expiredTimeInput = document.getElementById('expired_time');
+    
+    // Show/hide expiry fields based on checkbox
+    hasExpiryCheckbox.addEventListener('change', function() {
+        if (this.checked) {
+            expiryFields.style.display = 'block';
+            // Set default time to 23:59 if not specified
+            if (!expiredTimeInput.value) {
+                expiredTimeInput.value = '23:59';
+            }
+        } else {
+            expiryFields.style.display = 'none';
+            // Clear values when unchecked
+            expiredDateInput.value = '';
+            expiredTimeInput.value = '';
+        }
+    });
+    
+    // Set default time to 23:59 if date is selected
+    expiredDateInput.addEventListener('change', function() {
+        if (hasExpiryCheckbox.checked && !expiredTimeInput.value) {
+            expiredTimeInput.value = '23:59';
+        }
+    });
+    
+    // Validate that time is set if date is set
+    const form = document.querySelector('form');
+    form.addEventListener('submit', function(event) {
+        if (hasExpiryCheckbox.checked) {
+            if (!expiredDateInput.value || !expiredTimeInput.value) {
+                event.preventDefault();
+                alert('Please select both expiry date and time when setting expiry.');
+                if (!expiredDateInput.value) {
+                    expiredDateInput.focus();
+                } else {
+                    expiredTimeInput.focus();
+                }
+            }
+        }
+    });
+});
+</script>
 {% endblock %}
