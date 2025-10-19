@@ -841,11 +841,48 @@ table inet tableku {
             logging.error(f"Error saving rules: {e}")
     except Exception as e:
         logging.error(f"Unexpected error in save_rules: {e}")
-        return False, f"Unexpected error: {e}"
+        return False, f"Unexpected error: {e}"   
+    
+def is_docker_installed():
+    """Periksa apakah Docker service terinstal"""
+    try:
+        # Cek apakah docker.service ada di sistem
+        result = subprocess.run(['systemctl', 'list-unit-files'], 
+                              capture_output=True, text=True)
+        return 'docker.service' in result.stdout
+    except Exception as e:
+        logging.error(f"Error checking Docker installation: {e}")
+        return False
 
+def restart_docker_service():
+    """Restart Docker service jika terinstal dan berjalan"""
+    if not is_docker_installed():
+        logging.info("Docker service is not installed, skipping restart")
+        return True, "Docker service not installed, skipping restart"
+    
+    try:
+        # Periksa status Docker
+        status_result = subprocess.run(['systemctl', 'is-active', 'docker'], 
+                                    capture_output=True, text=True)
         
+        if status_result.returncode != 0:
+            logging.info("Docker service is not active, skipping restart")
+            return True, "Docker service not active, skipping restart"
+        
+        logging.info("Restarting Docker service...")
+        result = subprocess.run(["systemctl", "restart", "docker"], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error(f"Error restarting Docker: {result.stderr}")
+            return False, f"Error restarting Docker: {result.stderr}"
+        logging.info("Docker service restarted successfully")
+        return True, "Docker service restarted successfully"
+    except Exception as e:
+        logging.error(f"Error restarting Docker service: {e}")
+        return False, f"Error restarting Docker service: {e}"
+
 def reload_nft():
-    """Reload konfigurasi nftables"""
+    """Reload konfigurasi nftables dan restart Docker service jika tersedia"""
     try:
         logging.info("=== Starting reload_nft process ===")
         
@@ -865,7 +902,19 @@ def reload_nft():
                 logging.error(f"Error restarting nftables: {result.stderr}")
                 return False, f"Error restarting nftables: {result.stderr}"
             logging.info("nftables reloaded successfully")
-            return True, "nftables reloaded successfully"
+            
+            # Restart Docker service jika tersedia
+            docker_success, docker_message = restart_docker_service()
+            if not docker_success:
+                logging.warning(f"Failed to restart Docker: {docker_message}")
+                # Tetap lanjutkan meskipun Docker gagal di-restart
+                return True, "nftables reloaded successfully, but Docker restart failed"
+            
+            # Jika Docker tidak terinstal atau tidak aktif, kita anggap sukses
+            if "not installed" in docker_message or "not active" in docker_message:
+                return True, f"nftables reloaded successfully. {docker_message}"
+            
+            return True, "nftables and Docker services restarted successfully"
         except subprocess.CalledProcessError as e:
             logging.error(f"Error in systemctl command: {e}")
             return False, f"Error in systemctl command: {e}"
@@ -873,7 +922,7 @@ def reload_nft():
     except Exception as e:
         logging.error(f"Unexpected error in reload_nft: {e}")
         return False, f"Unexpected error: {e}"
-
+    
 # Autentikasi
 def login_required(f):
     def decorated_function(*args, **kwargs):
