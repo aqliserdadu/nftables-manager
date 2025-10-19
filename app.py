@@ -31,6 +31,10 @@ RULES_FILE = "/etc/nftables.d/custom.nft"
 NFT_CONF = "/etc/nftables.conf"
 BACKUP_DIR = "/etc/nftables.d/backups"
 
+# Path ke executable
+SYSTEMCTL = "/usr/bin/systemctl"
+NFT = "/usr/sbin/nft"
+
 def adapt_datetime(ts):
     """Adapter untuk datetime ke SQLite"""
     return ts.isoformat()
@@ -359,7 +363,16 @@ def restore_from_backup(backup_path):
 def check_nftables_status():
     """Mengecek status service nftables"""
     try:
-        check_service = subprocess.run(['/usr/bin/systemctl', 'is-enabled', 'nftables'], 
+        # Cek apakah systemctl tersedia
+        if not os.path.exists(SYSTEMCTL):
+            return {
+                'installed': False,
+                'enabled': False,
+                'active': False,
+                'message': 'systemctl not available'
+            }
+            
+        check_service = subprocess.run([SYSTEMCTL, 'is-enabled', 'nftables'], 
                                      capture_output=True, text=True)
         
         if check_service.returncode != 0:
@@ -370,17 +383,17 @@ def check_nftables_status():
                 'message': 'nftables service is not installed'
             }
         
-        status_result = subprocess.run(['/usr/bin/systemctl', 'is-active', 'nftables'], 
+        status_result = subprocess.run([SYSTEMCTL, 'is-active', 'nftables'], 
                                     capture_output=True, text=True)
         
         is_active = status_result.returncode == 0
         
-        enabled_result = subprocess.run(['/usr/bin/systemctl', 'is-enabled', 'nftables'], 
+        enabled_result = subprocess.run([SYSTEMCTL, 'is-enabled', 'nftables'], 
                                       capture_output=True, text=True)
         
         is_enabled = enabled_result.returncode == 0
         
-        status_detail = subprocess.run(['/usr/bin/systemctl', 'status', 'nftables'], 
+        status_detail = subprocess.run([SYSTEMCTL, 'status', 'nftables'], 
                                     capture_output=True, text=True)
         
         return {
@@ -730,7 +743,107 @@ def toggle_rule_in_db(rule_id):
     conn.commit()
     conn.close()
 
-# Fungsi nftablesdef save_rules():
+def is_docker_installed():
+    """Periksa apakah Docker service terinstal"""
+    try:
+        # Cek apakah systemctl tersedia
+        if not os.path.exists(SYSTEMCTL):
+            logging.warning("systemctl not available, cannot check Docker installation")
+            return False
+            
+        # Cek apakah docker.service ada di sistem
+        result = subprocess.run([SYSTEMCTL, 'list-unit-files'], 
+                              capture_output=True, text=True)
+        return 'docker.service' in result.stdout
+    except Exception as e:
+        logging.error(f"Error checking Docker installation: {e}")
+        return False
+
+def restart_docker_service():
+    """Restart Docker service jika terinstal dan berjalan"""
+    if not is_docker_installed():
+        logging.info("Docker service is not installed, skipping restart")
+        return True, "Docker service not installed, skipping restart"
+    
+    try:
+        # Periksa status Docker
+        status_result = subprocess.run([SYSTEMCTL, 'is-active', 'docker'], 
+                                    capture_output=True, text=True)
+        
+        if status_result.returncode != 0:
+            logging.info("Docker service is not active, skipping restart")
+            return True, "Docker service not active, skipping restart"
+        
+        logging.info("Restarting Docker service...")
+        result = subprocess.run([SYSTEMCTL, "restart", "docker"], 
+                              capture_output=True, text=True)
+        if result.returncode != 0:
+            logging.error(f"Error restarting Docker: {result.stderr}")
+            return False, f"Error restarting Docker: {result.stderr}"
+        logging.info("Docker service restarted successfully")
+        return True, "Docker service restarted successfully"
+    except Exception as e:
+        logging.error(f"Error restarting Docker service: {e}")
+        return False, f"Error restarting Docker service: {e}"
+
+def reload_nft():
+    """Reload konfigurasi nftables dan restart Docker service jika tersedia"""
+    try:
+        logging.info("=== Starting reload_nft process ===")
+        
+        logging.info(f"Copying {RULES_FILE} to {NFT_CONF}")
+        try:
+            subprocess.run(["/usr/bin/cp", RULES_FILE, NFT_CONF], check=True)
+            logging.info("File copy successful")
+        except subprocess.CalledProcessError as e:
+            logging.error(f"Error copying file: {e}")
+            return False, f"Error copying file: {e}"
+        
+        # Cek apakah systemctl tersedia
+        if os.path.exists(SYSTEMCTL):
+            logging.info("Restarting nftables service...")
+            try:
+                result = subprocess.run([SYSTEMCTL, "restart", "nftables"], 
+                                      capture_output=True, text=True)
+                if result.returncode != 0:
+                    logging.error(f"Error restarting nftables: {result.stderr}")
+                    return False, f"Error restarting nftables: {result.stderr}"
+                logging.info("nftables reloaded successfully")
+                
+                # Restart Docker service jika tersedia
+                docker_success, docker_message = restart_docker_service()
+                if not docker_success:
+                    logging.warning(f"Failed to restart Docker: {docker_message}")
+                    # Tetap lanjutkan meskipun Docker gagal di-restart
+                    return True, "nftables reloaded successfully, but Docker restart failed"
+                
+                # Jika Docker tidak terinstal atau tidak aktif, kita anggap sukses
+                if "not installed" in docker_message or "not active" in docker_message:
+                    return True, f"nftables reloaded successfully. {docker_message}"
+                
+                return True, "nftables and Docker services restarted successfully"
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Error in systemctl command: {e}")
+                return False, f"Error in systemctl command: {e}"
+        else:
+            # Jika systemctl tidak tersedia, coba reload nftables langsung
+            logging.warning("systemctl not available, trying to reload nftables directly")
+            try:
+                result = subprocess.run([NFT, "-f", NFT_CONF], 
+                                      capture_output=True, text=True)
+                if result.returncode != 0:
+                    logging.error(f"Error reloading nftables: {result.stderr}")
+                    return False, f"Error reloading nftables: {result.stderr}"
+                logging.info("nftables reloaded successfully")
+                return True, "nftables reloaded successfully"
+            except subprocess.CalledProcessError as e:
+                logging.error(f"Error reloading nftables: {e}")
+                return False, f"Error reloading nftables: {e}"
+            
+    except Exception as e:
+        logging.error(f"Unexpected error in reload_nft: {e}")
+        return False, f"Unexpected error: {e}"
+
 def save_rules():
     """Simpan aturan ke file dan reload nftables"""
     try:
@@ -743,7 +856,7 @@ def save_rules():
         
         # Pertama cek apakah tabel sudah ada
         try:
-            result = subprocess.run(['/usr/sbin/nft', 'list', 'tables'], 
+            result = subprocess.run([NFT, 'list', 'tables'], 
                                   capture_output=True, text=True)
             table_exists = 'inet tableku' in result.stdout
             logging.info(f"Table 'tableku' exists: {table_exists}")
@@ -841,86 +954,6 @@ table inet tableku {
             logging.error(f"Error saving rules: {e}")
     except Exception as e:
         logging.error(f"Unexpected error in save_rules: {e}")
-        return False, f"Unexpected error: {e}"   
-    
-def is_docker_installed():
-    """Periksa apakah Docker service terinstal"""
-    try:
-        # Cek apakah docker.service ada di sistem
-        result = subprocess.run(['systemctl', 'list-unit-files'], 
-                              capture_output=True, text=True)
-        return 'docker.service' in result.stdout
-    except Exception as e:
-        logging.error(f"Error checking Docker installation: {e}")
-        return False
-
-def restart_docker_service():
-    """Restart Docker service jika terinstal dan berjalan"""
-    if not is_docker_installed():
-        logging.info("Docker service is not installed, skipping restart")
-        return True, "Docker service not installed, skipping restart"
-    
-    try:
-        # Periksa status Docker
-        status_result = subprocess.run(['systemctl', 'is-active', 'docker'], 
-                                    capture_output=True, text=True)
-        
-        if status_result.returncode != 0:
-            logging.info("Docker service is not active, skipping restart")
-            return True, "Docker service not active, skipping restart"
-        
-        logging.info("Restarting Docker service...")
-        result = subprocess.run(["systemctl", "restart", "docker"], 
-                              capture_output=True, text=True)
-        if result.returncode != 0:
-            logging.error(f"Error restarting Docker: {result.stderr}")
-            return False, f"Error restarting Docker: {result.stderr}"
-        logging.info("Docker service restarted successfully")
-        return True, "Docker service restarted successfully"
-    except Exception as e:
-        logging.error(f"Error restarting Docker service: {e}")
-        return False, f"Error restarting Docker service: {e}"
-
-def reload_nft():
-    """Reload konfigurasi nftables dan restart Docker service jika tersedia"""
-    try:
-        logging.info("=== Starting reload_nft process ===")
-        
-        logging.info(f"Copying {RULES_FILE} to {NFT_CONF}")
-        try:
-            subprocess.run(["/usr/bin/cp", RULES_FILE, NFT_CONF], check=True)
-            logging.info("File copy successful")
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error copying file: {e}")
-            return False, f"Error copying file: {e}"
-        
-        logging.info("Restarting nftables service...")
-        try:
-            result = subprocess.run(["/usr/bin/systemctl", "restart", "nftables"], 
-                                  capture_output=True, text=True)
-            if result.returncode != 0:
-                logging.error(f"Error restarting nftables: {result.stderr}")
-                return False, f"Error restarting nftables: {result.stderr}"
-            logging.info("nftables reloaded successfully")
-            
-            # Restart Docker service jika tersedia
-            docker_success, docker_message = restart_docker_service()
-            if not docker_success:
-                logging.warning(f"Failed to restart Docker: {docker_message}")
-                # Tetap lanjutkan meskipun Docker gagal di-restart
-                return True, "nftables reloaded successfully, but Docker restart failed"
-            
-            # Jika Docker tidak terinstal atau tidak aktif, kita anggap sukses
-            if "not installed" in docker_message or "not active" in docker_message:
-                return True, f"nftables reloaded successfully. {docker_message}"
-            
-            return True, "nftables and Docker services restarted successfully"
-        except subprocess.CalledProcessError as e:
-            logging.error(f"Error in systemctl command: {e}")
-            return False, f"Error in systemctl command: {e}"
-            
-    except Exception as e:
-        logging.error(f"Unexpected error in reload_nft: {e}")
         return False, f"Unexpected error: {e}"
     
 # Autentikasi
@@ -1269,7 +1302,7 @@ def delete_group(group_id):
 @login_required
 def status():
     try:
-        result = subprocess.run(['/usr/sbin/nft', 'list', 'ruleset'], 
+        result = subprocess.run([NFT, 'list', 'ruleset'], 
                                 capture_output=True, text=True, check=True)
         return render_template('status.html', ruleset=result.stdout)
     except subprocess.CalledProcessError as e:
